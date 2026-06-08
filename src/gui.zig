@@ -185,12 +185,19 @@ fn drawOutputSection(app: *app_mod.App, preview_buf: *[65536:0]u8) void {
 }
 
 fn drawActionSection(app: *app_mod.App) void {
-    const disabled = !app.canTranscribe();
-    if (disabled) zgui.beginDisabled(.{});
-    if (zgui.button("Transcribe", .{ .w = 140 })) {
-        app.startTranscription() catch {};
+    const transcribing = app.status == .transcribing;
+    if (transcribing) {
+        if (zgui.button("Cancel", .{ .w = 140 })) {
+            app.cancelTranscription();
+        }
+    } else {
+        const disabled = !app.canTranscribe();
+        if (disabled) zgui.beginDisabled(.{});
+        if (zgui.button("Transcribe", .{ .w = 140 })) {
+            app.startTranscription() catch {};
+        }
+        if (disabled) zgui.endDisabled();
     }
-    if (disabled) zgui.endDisabled();
 }
 
 fn drawStatusSection(app: *app_mod.App, log_buf: *[262144:0]u8) void {
