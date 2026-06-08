@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const log = @import("log.zig");
 
 const c = @cImport({
     @cDefine("UINTPTR_MAX", "0xFFFFFFFFFFFFFFFF");
@@ -13,6 +14,7 @@ pub const Options = struct {
     n_gpu_layers: c_int = -1,
     n_threads: ?c_int = null,
     max_tokens: c_int = 4096,
+    log_buffer: ?*log.Buffer = null,
 };
 
 pub const Error = error{
@@ -29,12 +31,18 @@ pub const Error = error{
 } || std.mem.Allocator.Error;
 
 pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
+    if (opts.log_buffer) |buf| {
+        c.llama_log_set(&log.llamaCallback, @ptrCast(buf));
+        buf.appendFmt("Initializing llama.cpp backend...", .{});
+    }
+
     c.llama_backend_init();
     defer c.llama_backend_free();
     _ = c.ggml_backend_load_all();
 
     var mparams = c.llama_model_default_params();
     mparams.n_gpu_layers = if (cpuOnly()) 0 else opts.n_gpu_layers;
+    if (opts.log_buffer) |buf| buf.appendFmt("Loading model: {s}", .{opts.model_path});
     const model = c.llama_model_load_from_file(opts.model_path.ptr, mparams) orelse return error.ModelLoadFailed;
     defer c.llama_model_free(model);
 
@@ -52,6 +60,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
 
     const ctx = c.llama_init_from_model(model, cparams) orelse return error.ContextCreateFailed;
     defer c.llama_free(ctx);
+    if (opts.log_buffer) |buf| buf.appendFmt("Model loaded. Processing audio: {s}", .{opts.audio_path});
 
     var mtmd_params = c.mtmd_context_params_default();
     mtmd_params.use_gpu = !cpuOnly();
@@ -99,6 +108,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
         &n_past,
     );
     if (eval_res != 0) return error.EvalFailed;
+    if (opts.log_buffer) |buf| buf.appendFmt("Generating transcription...", .{});
 
     const vocab = c.llama_model_get_vocab(model);
     const sampler = c.llama_sampler_chain_init(c.llama_sampler_chain_default_params());
