@@ -57,10 +57,6 @@ fn checkGenerationResult(res: c_int, cancel_flag: ?*std.atomic.Value(bool)) Erro
 
 pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     try checkCancelled(opts.cancel_flag);
-    if (opts.log_buffer) |buf| {
-        c.llama_log_set(&log.llamaCallback, @ptrCast(buf));
-        buf.appendFmt("Initializing llama.cpp backend...", .{});
-    }
 
     c.llama_backend_init();
     defer c.llama_backend_free();
@@ -84,6 +80,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     var cparams = c.llama_context_default_params();
     cparams.n_ctx = 8192;
     cparams.n_batch = 512;
+    cparams.no_perf = false;
     if (opts.n_threads) |n| {
         cparams.n_threads = n;
         cparams.n_threads_batch = n;
@@ -104,6 +101,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     var mtmd_params = c.mtmd_context_params_default();
     mtmd_params.use_gpu = !cpuOnly();
     mtmd_params.n_threads = cparams.n_threads;
+    mtmd_params.print_timings = false;
     if (opts.cancel_flag) |flag| {
         mtmd_params.cb_eval = mtmdEvalCallback;
         mtmd_params.cb_eval_user_data = @ptrCast(flag);
@@ -160,7 +158,6 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
         );
         try checkEvalResult(eval_res, opts.cancel_flag);
     }
-    if (opts.log_buffer) |buf| buf.appendFmt("Generating transcription...", .{});
     try checkCancelled(opts.cancel_flag);
 
     const vocab = c.llama_model_get_vocab(model);
@@ -199,12 +196,46 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
         try checkGenerationResult(c.llama_decode(ctx, batch), opts.cancel_flag);
     }
 
+    if (opts.log_buffer) |buf| appendPerfStats(buf, ctx);
+
     while (output.items.len > 0 and std.ascii.isWhitespace(output.items[output.items.len - 1])) {
         _ = output.pop();
     }
 
     const raw = try output.toOwnedSlice(allocator);
     return cleanAsrOutput(allocator, raw);
+}
+
+fn appendPerfStats(buf: *log.Buffer, ctx: *c.llama_context) void {
+    const data = c.llama_perf_context(ctx);
+
+    if (data.n_p_eval > 0) {
+        const n = @as(f64, @floatFromInt(data.n_p_eval));
+        const ms_per_token = data.t_p_eval_ms / n;
+        const tokens_per_sec = 1e3 / data.t_p_eval_ms * n;
+        buf.appendFmt(
+            "prompt eval time = {d: >10.2} ms / {d: >5} tokens ({d: >8.2} ms per token, {d: >8.2} tokens per second)",
+            .{ data.t_p_eval_ms, data.n_p_eval, ms_per_token, tokens_per_sec },
+        );
+    }
+
+    if (data.n_eval > 0) {
+        const n = @as(f64, @floatFromInt(data.n_eval));
+        const ms_per_token = data.t_eval_ms / n;
+        const tokens_per_sec = 1e3 / data.t_eval_ms * n;
+        buf.appendFmt(
+            "       eval time = {d: >10.2} ms / {d: >5} tokens ({d: >8.2} ms per token, {d: >8.2} tokens per second)",
+            .{ data.t_eval_ms, data.n_eval, ms_per_token, tokens_per_sec },
+        );
+    }
+
+    const total_tokens = data.n_p_eval + data.n_eval;
+    if (total_tokens > 0) {
+        const total_ms = data.t_p_eval_ms + data.t_eval_ms;
+        buf.appendFmt("      total time = {d: >10.2} ms / {d: >5} tokens", .{ total_ms, total_tokens });
+    }
+
+    buf.appendFmt("   graphs reused = {d: >10}", .{data.n_reused});
 }
 
 fn cleanAsrOutput(allocator: std.mem.Allocator, raw: []u8) Error![]u8 {
