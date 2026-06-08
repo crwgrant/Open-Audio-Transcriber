@@ -22,6 +22,7 @@
         "build.zig.zon",
         "src",
         "deps",
+        "docs",
         "packaging",
         "README.md",
     },
