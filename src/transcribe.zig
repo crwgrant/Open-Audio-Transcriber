@@ -15,6 +15,7 @@ pub const Options = struct {
     n_threads: ?c_int = null,
     max_tokens: c_int = 4096,
     log_buffer: ?*log.Buffer = null,
+    cancel_flag: ?*std.atomic.Value(bool) = null,
 };
 
 pub const Error = error{
@@ -28,9 +29,34 @@ pub const Error = error{
     EvalFailed,
     GenerationFailed,
     UnsupportedAudio,
+    Cancelled,
 } || std.mem.Allocator.Error;
 
+fn isCancelled(cancel_flag: ?*std.atomic.Value(bool)) bool {
+    if (cancel_flag) |flag| return flag.load(.acquire);
+    return false;
+}
+
+fn checkCancelled(cancel_flag: ?*std.atomic.Value(bool)) Error!void {
+    if (isCancelled(cancel_flag)) return error.Cancelled;
+}
+
+fn checkEvalResult(res: c_int, cancel_flag: ?*std.atomic.Value(bool)) Error!void {
+    if (res == 0) return;
+    try checkCancelled(cancel_flag);
+    if (res == 2) return error.Cancelled;
+    return error.EvalFailed;
+}
+
+fn checkGenerationResult(res: c_int, cancel_flag: ?*std.atomic.Value(bool)) Error!void {
+    if (res == 0) return;
+    try checkCancelled(cancel_flag);
+    if (res == 2) return error.Cancelled;
+    return error.GenerationFailed;
+}
+
 pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
+    try checkCancelled(opts.cancel_flag);
     if (opts.log_buffer) |buf| {
         c.llama_log_set(&log.llamaCallback, @ptrCast(buf));
         buf.appendFmt("Initializing llama.cpp backend...", .{});
@@ -39,12 +65,21 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     c.llama_backend_init();
     defer c.llama_backend_free();
     _ = c.ggml_backend_load_all();
+    try checkCancelled(opts.cancel_flag);
 
     var mparams = c.llama_model_default_params();
     mparams.n_gpu_layers = if (cpuOnly()) 0 else opts.n_gpu_layers;
+    if (opts.cancel_flag) |flag| {
+        mparams.progress_callback = llamaProgressCallback;
+        mparams.progress_callback_user_data = @ptrCast(flag);
+    }
     if (opts.log_buffer) |buf| buf.appendFmt("Loading model: {s}", .{opts.model_path});
-    const model = c.llama_model_load_from_file(opts.model_path.ptr, mparams) orelse return error.ModelLoadFailed;
+    const model = c.llama_model_load_from_file(opts.model_path.ptr, mparams) orelse {
+        try checkCancelled(opts.cancel_flag);
+        return error.ModelLoadFailed;
+    };
     defer c.llama_model_free(model);
+    try checkCancelled(opts.cancel_flag);
 
     var cparams = c.llama_context_default_params();
     cparams.n_ctx = 8192;
@@ -60,11 +95,19 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
 
     const ctx = c.llama_init_from_model(model, cparams) orelse return error.ContextCreateFailed;
     defer c.llama_free(ctx);
+    if (opts.cancel_flag) |flag| {
+        c.llama_set_abort_callback(ctx, llamaAbortCallback, @ptrCast(flag));
+    }
     if (opts.log_buffer) |buf| buf.appendFmt("Model loaded. Processing audio: {s}", .{opts.audio_path});
+    try checkCancelled(opts.cancel_flag);
 
     var mtmd_params = c.mtmd_context_params_default();
     mtmd_params.use_gpu = !cpuOnly();
     mtmd_params.n_threads = cparams.n_threads;
+    if (opts.cancel_flag) |flag| {
+        mtmd_params.cb_eval = mtmdEvalCallback;
+        mtmd_params.cb_eval_user_data = @ptrCast(flag);
+    }
     const mtmd_ctx = c.mtmd_init_from_file(opts.mmproj_path.ptr, model, mtmd_params) orelse return error.MtmdInitFailed;
     defer c.mtmd_free(mtmd_ctx);
 
@@ -72,6 +115,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
 
     const audio_bitmap = c.mtmd_helper_bitmap_init_from_file(mtmd_ctx, opts.audio_path.ptr, false) orelse return error.AudioLoadFailed;
     defer c.mtmd_bitmap_free(audio_bitmap);
+    try checkCancelled(opts.cancel_flag);
 
     const marker = c.mtmd_default_marker();
     const user_prompt = try std.fmt.allocPrint(allocator, "{s}Transcribe audio to text", .{std.mem.span(marker)});
@@ -97,18 +141,27 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     if (tok_res != 0) return error.TokenizeFailed;
 
     var n_past: c.llama_pos = 0;
-    const eval_res = c.mtmd_helper_eval_chunks(
-        mtmd_ctx,
-        ctx,
-        chunks,
-        0,
-        0,
-        @intCast(cparams.n_batch),
-        true,
-        &n_past,
-    );
-    if (eval_res != 0) return error.EvalFailed;
+    const n_chunks = c.mtmd_input_chunks_size(chunks);
+    const n_batch: c_int = @intCast(cparams.n_batch);
+    var i_chunk: usize = 0;
+    while (i_chunk < n_chunks) : (i_chunk += 1) {
+        try checkCancelled(opts.cancel_flag);
+        const chunk_logits_last = (i_chunk == n_chunks - 1);
+        const chunk = c.mtmd_input_chunks_get(chunks, i_chunk);
+        const eval_res = c.mtmd_helper_eval_chunk_single(
+            mtmd_ctx,
+            ctx,
+            chunk,
+            n_past,
+            0,
+            n_batch,
+            chunk_logits_last,
+            &n_past,
+        );
+        try checkEvalResult(eval_res, opts.cancel_flag);
+    }
     if (opts.log_buffer) |buf| buf.appendFmt("Generating transcription...", .{});
+    try checkCancelled(opts.cancel_flag);
 
     const vocab = c.llama_model_get_vocab(model);
     const sampler = c.llama_sampler_chain_init(c.llama_sampler_chain_default_params());
@@ -123,6 +176,8 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
 
     var i: c_int = 0;
     while (i < opts.max_tokens) : (i += 1) {
+        try checkCancelled(opts.cancel_flag);
+
         const token = c.llama_sampler_sample(sampler, ctx, -1);
         if (c.llama_vocab_is_eog(vocab, token)) break;
         c.llama_sampler_accept(sampler, token);
@@ -141,7 +196,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
         batch.logits[0] = 1;
         n_past += 1;
 
-        if (c.llama_decode(ctx, batch) != 0) return error.GenerationFailed;
+        try checkGenerationResult(c.llama_decode(ctx, batch), opts.cancel_flag);
     }
 
     while (output.items.len > 0 and std.ascii.isWhitespace(output.items[output.items.len - 1])) {
@@ -186,4 +241,26 @@ fn formatChatPrompt(allocator: std.mem.Allocator, model: *c.llama_model, user_co
 
 fn cpuOnly() bool {
     return builtin.os.tag == .windows;
+}
+
+export fn llamaAbortCallback(data: ?*anyopaque) callconv(.c) bool {
+    const flag: *std.atomic.Value(bool) = @ptrCast(@alignCast(data));
+    return flag.load(.acquire);
+}
+
+export fn llamaProgressCallback(progress: f32, data: ?*anyopaque) callconv(.c) bool {
+    _ = progress;
+    const flag: *std.atomic.Value(bool) = @ptrCast(@alignCast(data));
+    return !flag.load(.acquire);
+}
+
+export fn mtmdEvalCallback(t: ?*c.struct_ggml_tensor, ask: bool, data: ?*anyopaque) callconv(.c) bool {
+    _ = t;
+    const flag: *std.atomic.Value(bool) = @ptrCast(@alignCast(data));
+    if (flag.load(.acquire)) {
+        if (ask) return true;
+        return false;
+    }
+    if (ask) return false;
+    return true;
 }
