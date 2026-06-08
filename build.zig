@@ -40,7 +40,10 @@ pub fn build(b: *std.Build) void {
     });
 
     if (target_os == .windows) {
-        exe.subsystem = .Windows;
+        exe.subsystem = switch (optimize) {
+            .Debug => .Console,
+            else => .Windows,
+        };
     }
 
     exe.step.dependOn(llama_step);
