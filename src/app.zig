@@ -2,6 +2,7 @@ const std = @import("std");
 
 const config = @import("config.zig");
 const io_util = @import("io_util.zig");
+const log = @import("log.zig");
 const models = @import("models.zig");
 const transcribe = @import("transcribe.zig");
 
@@ -25,16 +26,21 @@ pub const App = struct {
     audio_path: []const u8 = "",
     output_path: []const u8 = "",
     last_transcript: []const u8 = "",
+    process_log: log.Buffer,
     worker: ?std.Thread = null,
     worker_err: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) App {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .process_log = log.Buffer.init(allocator),
+        };
     }
 
     pub fn deinit(self: *App) void {
         self.waitForWorker();
         self.freeDiscovered();
+        self.process_log.deinit();
         if (self.custom_model_path.len > 0) self.allocator.free(self.custom_model_path);
         if (self.custom_mmproj_path.len > 0) self.allocator.free(self.custom_mmproj_path);
         if (self.audio_path.len > 0) self.allocator.free(self.audio_path);
@@ -150,6 +156,9 @@ pub const App = struct {
         }
 
         self.setStatus(.transcribing, "Transcribing audio...");
+        self.process_log.clear();
+        self.process_log.appendFmt("Starting transcription...", .{});
+
         const ctx = try self.allocator.create(WorkerContext);
         ctx.* = .{
             .app = self,
@@ -189,12 +198,14 @@ pub const App = struct {
             .success => |text| {
                 self.allocator.free(self.last_transcript);
                 self.last_transcript = text;
+                self.process_log.appendFmt("Transcription complete.", .{});
                 self.setStatus(.done, "Transcription complete");
             },
             .failure => |err_msg| {
                 if (self.worker_err) |e| self.allocator.free(e);
                 self.worker_err = err_msg;
-                self.setStatus(.error_state, err_msg);
+                self.process_log.appendFmt("Error: {s}", .{err_msg});
+                self.setStatus(.error_state, "Transcription failed");
             },
         }
     }
@@ -227,6 +238,7 @@ fn workerMain(ctx: *WorkerContext) void {
             .model_path = ctx.model_path,
             .mmproj_path = ctx.mmproj_path,
             .audio_path = ctx.audio_path,
+            .log_buffer = &ctx.app.process_log,
         }) catch |err| {
             const msg = std.fmt.allocPrint(ctx.app.allocator, "Transcription failed: {s}", .{@errorName(err)}) catch {
                 break :blk .{ .failure = ctx.app.allocator.dupe(u8, "Transcription failed") catch unreachable };

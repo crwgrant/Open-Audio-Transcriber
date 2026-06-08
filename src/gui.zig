@@ -30,6 +30,7 @@ pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
 
     const gl = zopengl.bindings;
     var preview_buf: [65536:0]u8 = @splat(0);
+    var log_buf: [262144:0]u8 = @splat(0);
 
     while (!window.shouldClose()) {
         application.poll();
@@ -64,7 +65,7 @@ pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
             drawOutputSection(application, &preview_buf);
             zgui.separator();
             drawActionSection(application);
-            drawStatusSection(application);
+            drawStatusSection(application, &log_buf);
         }
         zgui.end();
 
@@ -192,7 +193,7 @@ fn drawActionSection(app: *app_mod.App) void {
     if (disabled) zgui.endDisabled();
 }
 
-fn drawStatusSection(app: *app_mod.App) void {
+fn drawStatusSection(app: *app_mod.App, log_buf: *[262144:0]u8) void {
     zgui.separator();
     const color: [4]f32 = switch (app.status) {
         .idle, .loading_models, .ready => .{ 0.7, 0.7, 0.7, 1.0 },
@@ -201,7 +202,17 @@ fn drawStatusSection(app: *app_mod.App) void {
         .error_state => .{ 1.0, 0.3, 0.3, 1.0 },
     };
     zgui.textColored(color, "{s}", .{app.status_message});
-    if (app.worker_err) |err| {
-        zgui.textWrapped("{s}", .{err});
+
+    zgui.text("Log", .{});
+    app.process_log.copyTo(log_buf);
+    if (zgui.beginChild("##log_panel", .{ .w = 0, .h = 180 })) {
+        _ = zgui.inputTextMultiline("##process_log", .{
+            .buf = log_buf,
+            .flags = .{ .read_only = true },
+        });
+        if (app.status == .transcribing) {
+            zgui.setScrollHereY(.{ .center_y_ratio = 1.0 });
+        }
+        zgui.endChild();
     }
 }

@@ -37,6 +37,10 @@ pub fn build(b: *std.Build) void {
         .root_module = root_mod,
     });
 
+    if (target_os == .windows) {
+        exe.subsystem = .Windows;
+    }
+
     exe.step.dependOn(llama_step);
 
     addPlatformDeps(root_mod, b, target_os);
