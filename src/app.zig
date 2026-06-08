@@ -25,7 +25,6 @@ pub const App = struct {
     custom_mmproj_path: []const u8 = "",
     audio_path: []const u8 = "",
     output_path: []const u8 = "",
-    last_transcript: []const u8 = "",
     process_log: log.Buffer,
     worker: ?std.Thread = null,
     worker_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -49,7 +48,6 @@ pub const App = struct {
         if (self.custom_mmproj_path.len > 0) self.allocator.free(self.custom_mmproj_path);
         if (self.audio_path.len > 0) self.allocator.free(self.audio_path);
         if (self.output_path.len > 0) self.allocator.free(self.output_path);
-        if (self.last_transcript.len > 0) self.allocator.free(self.last_transcript);
         if (self.worker_err) |e| self.allocator.free(e);
     }
 
@@ -234,8 +232,7 @@ pub const App = struct {
     fn onWorkerDone(self: *App, result: WorkerResult) void {
         switch (result) {
             .success => |text| {
-                self.allocator.free(self.last_transcript);
-                self.last_transcript = text;
+                self.allocator.free(text);
                 self.process_log.appendFmt("Transcription complete.", .{});
                 self.setStatus(.done, "Transcription complete");
             },

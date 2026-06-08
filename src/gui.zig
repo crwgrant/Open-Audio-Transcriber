@@ -29,7 +29,6 @@ pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
     defer zgui.backend.deinit();
 
     const gl = zopengl.bindings;
-    var preview_buf: [65536:0]u8 = @splat(0);
     var log_buf: [262144:0]u8 = @splat(0);
 
     while (!window.shouldClose()) {
@@ -62,7 +61,7 @@ pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
             zgui.separator();
             drawAudioSection(application);
             zgui.separator();
-            drawOutputSection(application, &preview_buf);
+            drawOutputSection(application);
             zgui.separator();
             drawActionSection(application);
             drawStatusSection(application, &log_buf);
@@ -157,7 +156,7 @@ fn drawAudioSection(app: *app_mod.App) void {
     zgui.textDisabled("Supports wav, mp3, flac via llama.cpp", .{});
 }
 
-fn drawOutputSection(app: *app_mod.App, preview_buf: *[65536:0]u8) void {
+fn drawOutputSection(app: *app_mod.App) void {
     zgui.text("Output", .{});
     zgui.textWrapped("{s}", .{if (app.output_path.len > 0) app.output_path else "(none selected)"});
     if (zgui.button("Choose output file...", .{})) {
@@ -169,18 +168,6 @@ fn drawOutputSection(app: *app_mod.App, preview_buf: *[65536:0]u8) void {
             defer app.allocator.free(path);
             app.setOutputPath(path) catch {};
         }
-    }
-
-    if (app.last_transcript.len > 0) {
-        zgui.separator();
-        zgui.text("Preview", .{});
-        const copy_len = @min(app.last_transcript.len, preview_buf.len - 1);
-        @memcpy(preview_buf[0..copy_len], app.last_transcript[0..copy_len]);
-        preview_buf[copy_len] = 0;
-        _ = zgui.inputTextMultiline("##preview", .{
-            .buf = preview_buf,
-            .flags = .{ .read_only = true },
-        });
     }
 }
 
