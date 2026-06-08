@@ -5,6 +5,7 @@ const zopengl = @import("zopengl");
 
 const app_mod = @import("app.zig");
 const dialog = @import("dialog.zig");
+const runtime_mod = @import("runtime.zig");
 
 pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
     try zglfw.init();
@@ -58,6 +59,8 @@ pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
             },
         })) {
             drawModelSection(application);
+            zgui.separator();
+            drawRuntimeSection(application);
             zgui.separator();
             drawAudioSection(application);
             zgui.separator();
@@ -133,6 +136,38 @@ fn drawModelSection(app: *app_mod.App) void {
     }
     zgui.sameLine(.{});
     zgui.textDisabled("Searches ~/.lmstudio, ~/.ollama, ~/.cache/huggingface", .{});
+}
+
+fn drawRuntimeSection(app: *app_mod.App) void {
+    zgui.text("Runtime", .{});
+    if (app.runtimes.len == 0) {
+        zgui.textDisabled("No runtimes detected", .{});
+        return;
+    }
+
+    const selected_idx = runtime_mod.findOption(app.runtimes, app.selected_runtime) orelse 0;
+    const preview = app.runtimes[selected_idx].description;
+
+    const busy = app.status == .transcribing;
+    if (busy or app.runtimes.len == 1) zgui.beginDisabled(.{});
+
+    var preview_buf: [512]u8 = undefined;
+    const copy_len = @min(preview.len, preview_buf.len - 1);
+    @memcpy(preview_buf[0..copy_len], preview[0..copy_len]);
+    preview_buf[copy_len] = 0;
+
+    if (zgui.beginCombo("##runtime_combo", .{ .preview_value = @ptrCast(&preview_buf) })) {
+        for (app.runtimes) |opt| {
+            const selected = app.selected_runtime == opt.id;
+            if (zgui.selectable(opt.id.label(), .{ .selected = selected })) {
+                app.selectRuntime(opt.id);
+            }
+            if (selected) zgui.setItemDefaultFocus();
+        }
+        zgui.endCombo();
+    }
+
+    if (busy or app.runtimes.len == 1) zgui.endDisabled();
 }
 
 fn pickModelPair(app: *app_mod.App) void {

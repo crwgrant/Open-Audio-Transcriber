@@ -9,6 +9,7 @@
 #define UINTPTR_MAX 0xFFFFFFFFFFFFFFFF
 
 #include "llama.h"
+#include "ggml-backend.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
