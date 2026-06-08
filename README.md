@@ -48,6 +48,25 @@ zig build run
 
 The first build compiles llama.cpp via CMake into `.zig-cache/llama-cpp/` (may take a few minutes).
 
+### Windows (Vulkan GPU)
+
+Install the [LunarG Vulkan SDK](https://vulkan.lunarg.com/), then set `VULKAN_SDK` and build with the Vulkan backend enabled:
+
+```powershell
+$env:VULKAN_SDK = "C:/VulkanSDK/1.4.350.0"   # adjust to your install path
+zig build -Dggml-vulkan=true -Doptimize=ReleaseFast
+zig build run -Dggml-vulkan=true -Doptimize=ReleaseFast
+```
+
+`VULKAN_SDK` must be set whenever you build with `-Dggml-vulkan=true`. The first Vulkan build is slower (shader compilation). Use the **Runtime** dropdown in the app to pick CPU or Vulkan.
+
+CPU-only on Windows (no Vulkan SDK):
+
+```powershell
+zig build -Doptimize=ReleaseFast
+zig build run -Doptimize=ReleaseFast
+```
+
 ## Package (standalone macOS app)
 
 Build a release `.app` bundle you can copy to `/Applications`:
@@ -124,5 +143,5 @@ For continuing development on another machine (e.g. Windows port), see **[docs/A
 ## Notes
 
 - llama.cpp.zig upstream targets Zig 0.14 and an older llama.cpp without ASR. This project vendors llama.cpp.zig but uses a current llama.cpp submodule and links `libmtmd` built by CMake.
-- GPU acceleration uses Metal on macOS (`-DGGML_METAL=ON`).
+- GPU acceleration uses Metal on macOS (`-DGGML_METAL=ON`) or Vulkan on Windows (`-Dggml-vulkan=true`, requires Vulkan SDK).
 - Audio transcription in llama.cpp is still marked experimental upstream.

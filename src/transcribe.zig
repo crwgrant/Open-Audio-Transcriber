@@ -1,6 +1,6 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const log = @import("log.zig");
+const runtime_mod = @import("runtime.zig");
 
 const c = @cImport({
     @cDefine("UINTPTR_MAX", "0xFFFFFFFFFFFFFFFF");
@@ -16,6 +16,7 @@ pub const Options = struct {
     max_tokens: c_int = 4096,
     log_buffer: ?*log.Buffer = null,
     cancel_flag: ?*std.atomic.Value(bool) = null,
+    runtime: runtime_mod.Id = .cpu,
 };
 
 pub const Error = error{
@@ -64,7 +65,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     try checkCancelled(opts.cancel_flag);
 
     var mparams = c.llama_model_default_params();
-    mparams.n_gpu_layers = if (cpuOnly()) 0 else opts.n_gpu_layers;
+    mparams.n_gpu_layers = if (opts.runtime.useGpu()) opts.n_gpu_layers else 0;
     if (opts.cancel_flag) |flag| {
         mparams.progress_callback = llamaProgressCallback;
         mparams.progress_callback_user_data = @ptrCast(flag);
@@ -99,7 +100,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     try checkCancelled(opts.cancel_flag);
 
     var mtmd_params = c.mtmd_context_params_default();
-    mtmd_params.use_gpu = !cpuOnly();
+    mtmd_params.use_gpu = opts.runtime.useGpu();
     mtmd_params.n_threads = cparams.n_threads;
     mtmd_params.print_timings = false;
     if (opts.cancel_flag) |flag| {
@@ -268,10 +269,6 @@ fn formatChatPrompt(allocator: std.mem.Allocator, model: *c.llama_model, user_co
     const written = c.llama_chat_apply_template(tmpl, &msg, 1, true, &buf, @intCast(buf.len));
     if (written < 0) return error.PromptFormatFailed;
     return try allocator.dupe(u8, buf[0..@intCast(written)]);
-}
-
-fn cpuOnly() bool {
-    return builtin.os.tag == .windows;
 }
 
 export fn llamaAbortCallback(data: ?*anyopaque) callconv(.c) bool {

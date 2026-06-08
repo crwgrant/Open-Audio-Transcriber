@@ -22,7 +22,9 @@ pub fn build(b: *std.Build) void {
         });
     }
 
-    const llama_step = addLlamaCppBuild(b, optimize, host_os);
+    const enable_vulkan = b.option(bool, "ggml-vulkan", "Build llama.cpp with Vulkan backend (Windows only; requires Vulkan SDK)") orelse false;
+
+    const llama_step = addLlamaCppBuild(b, optimize, host_os, enable_vulkan);
 
     const root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -46,7 +48,7 @@ pub fn build(b: *std.Build) void {
     addPlatformDeps(root_mod, b, target_os);
     addLlamaIncludes(root_mod, b);
     root_mod.addIncludePath(.{ .cwd_relative = b.pathFromRoot("src") });
-    addLlamaLibs(root_mod, b, host_os);
+    addLlamaLibs(root_mod, b, host_os, enable_vulkan);
 
     const zglfw = b.dependency("zglfw", .{
         .target = target,
@@ -97,7 +99,36 @@ fn cmakeConfigName(optimize: std.builtin.OptimizeMode) []const u8 {
     };
 }
 
-fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.Target.Os.Tag) *std.Build.Step {
+fn cmakePath(b: *std.Build, path: []const u8) []const u8 {
+    const dup = b.allocator.dupe(u8, path) catch @panic("OOM");
+    std.mem.replaceScalar(u8, dup, '\\', '/');
+    return dup;
+}
+
+fn addVulkanShadersToolchain(b: *std.Build, tools: []const u8) struct { step: *std.Build.Step, path: []const u8 } {
+    const toolchain_path = b.pathJoin(&.{ ".zig-cache", "vulkan-shaders-toolchain.cmake" });
+    const content = b.fmt(
+        \\set(CMAKE_MAKE_PROGRAM "{s}/ninja.exe" CACHE FILEPATH "" FORCE)
+        \\set(CMAKE_C_COMPILER "{s}/zigcc.bat" CACHE FILEPATH "" FORCE)
+        \\set(CMAKE_CXX_COMPILER "{s}/zigcxx.bat" CACHE FILEPATH "" FORCE)
+        \\set(CMAKE_AR "{s}/zigar.bat" CACHE FILEPATH "" FORCE)
+        \\set(CMAKE_RANLIB "{s}/zigranlib.bat" CACHE FILEPATH "" FORCE)
+        \\
+    , .{
+        cmakePath(b, tools),
+        cmakePath(b, tools),
+        cmakePath(b, tools),
+        cmakePath(b, tools),
+        cmakePath(b, tools),
+    });
+    const write = b.addWriteFile(b.pathFromRoot(toolchain_path), content);
+    return .{
+        .step = &write.step,
+        .path = b.pathFromRoot(toolchain_path),
+    };
+}
+
+fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.Target.Os.Tag, enable_vulkan: bool) *std.Build.Step {
     const config_name = cmakeConfigName(optimize);
 
     const cmake = resolveCmakePath(b);
@@ -115,6 +146,8 @@ fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.T
         "-DLLAMA_BUILD_EXAMPLES=OFF",
         "-DLLAMA_BUILD_SERVER=OFF",
     }) catch @panic("OOM");
+
+    var vulkan_toolchain_step: ?*std.Build.Step = null;
 
     switch (os) {
         .macos => {
@@ -139,12 +172,42 @@ fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.T
                 b.fmt("-DCMAKE_RANLIB={s}", .{zigranlib}),
                 b.fmt("-DCMAKE_BUILD_TYPE={s}", .{config_name}),
                 "-DGGML_METAL=OFF",
+                if (enable_vulkan) "-DGGML_VULKAN=ON" else "-DGGML_VULKAN=OFF",
             }) catch @panic("OOM");
+            if (enable_vulkan) {
+                const vulkan_sdk = b.graph.environ_map.get("VULKAN_SDK") orelse {
+                    std.debug.panic(
+                        \\-Dggml-vulkan=true requires the LunarG Vulkan SDK.
+                        \\
+                        \\Install from https://vulkan.lunarg.com/ (Windows installer).
+                        \\After install, open a new terminal and verify:
+                        \\  echo %VULKAN_SDK%
+                        \\  glslc --version
+                        \\
+                        \\Then rebuild:
+                        \\  zig build -Dggml-vulkan=true -Doptimize=ReleaseFast
+                        \\
+                        \\CPU-only build (no Vulkan SDK needed):
+                        \\  zig build -Doptimize=ReleaseFast
+                    , .{});
+                };
+                configure_args.appendSlice(b.allocator, &.{
+                    b.fmt("-DCMAKE_PREFIX_PATH={s}", .{vulkan_sdk}),
+                    "-DGGML_NATIVE=ON",
+                }) catch @panic("OOM");
+                const toolchain = addVulkanShadersToolchain(b, tools);
+                vulkan_toolchain_step = toolchain.step;
+                configure_args.append(b.allocator, b.fmt(
+                    "-DGGML_VULKAN_SHADERS_GEN_TOOLCHAIN={s}",
+                    .{cmakePath(b, toolchain.path)},
+                )) catch @panic("OOM");
+            }
         },
         else => std.debug.panic("unsupported host OS for llama.cpp build: {s}", .{@tagName(os)}),
     }
 
     const configure = b.addSystemCommand(configure_args.items);
+    if (vulkan_toolchain_step) |step| configure.step.dependOn(step);
 
     var build_args = std.ArrayList([]const u8).empty;
     defer build_args.deinit(b.allocator);
@@ -285,7 +348,7 @@ fn addMacPackageStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
     package_step.dependOn(&sign_app.step);
 }
 
-fn addLlamaLibs(mod: *std.Build.Module, b: *std.Build, os: std.Target.Os.Tag) void {
+fn addLlamaLibs(mod: *std.Build.Module, b: *std.Build, os: std.Target.Os.Tag, enable_vulkan: bool) void {
     const build_dir = cmakeBuildDir(os);
     switch (os) {
         .macos => {
@@ -303,19 +366,31 @@ fn addLlamaLibs(mod: *std.Build.Module, b: *std.Build, os: std.Target.Os.Tag) vo
             }
         },
         .windows => {
-            const libs = [_][]const u8{
+            var libs: std.ArrayList([]const u8) = .empty;
+            defer libs.deinit(b.allocator);
+            libs.appendSlice(b.allocator, &.{
                 b.pathJoin(&.{ build_dir, "tools", "mtmd", "libmtmd.a" }),
                 b.pathJoin(&.{ build_dir, "src", "libllama.a" }),
                 b.pathJoin(&.{ build_dir, "ggml", "src", "ggml.a" }),
                 b.pathJoin(&.{ build_dir, "ggml", "src", "ggml-cpu.a" }),
                 b.pathJoin(&.{ build_dir, "ggml", "src", "ggml-base.a" }),
-            };
-            for (libs) |lib| {
+            }) catch @panic("OOM");
+            if (enable_vulkan) {
+                libs.append(b.allocator, b.pathJoin(&.{ build_dir, "ggml", "src", "ggml-vulkan", "ggml-vulkan.a" })) catch @panic("OOM");
+            }
+            for (libs.items) |lib| {
                 mod.addObjectFile(.{ .cwd_relative = b.pathFromRoot(lib) });
             }
             const win_sys = [_][]const u8{ "ws2_32", "advapi32", "bcrypt" };
             for (win_sys) |lib| {
                 mod.linkSystemLibrary(lib, .{});
+            }
+            if (enable_vulkan) {
+                const vulkan_sdk = b.graph.environ_map.get("VULKAN_SDK") orelse {
+                    std.debug.panic("-Dggml-vulkan=true requires VULKAN_SDK in the environment", .{});
+                };
+                mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ vulkan_sdk, "Lib" }) });
+                mod.linkSystemLibrary("vulkan-1", .{});
             }
         },
         else => {},

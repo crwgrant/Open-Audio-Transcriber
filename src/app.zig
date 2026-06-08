@@ -4,6 +4,7 @@ const config = @import("config.zig");
 const io_util = @import("io_util.zig");
 const log = @import("log.zig");
 const models = @import("models.zig");
+const runtime = @import("runtime.zig");
 const transcribe = @import("transcribe.zig");
 
 pub const Status = enum {
@@ -26,6 +27,8 @@ pub const App = struct {
     audio_path: []const u8 = "",
     output_path: []const u8 = "",
     process_log: log.Buffer,
+    runtimes: []runtime.Option = &.{},
+    selected_runtime: runtime.Id = .cpu,
     worker: ?std.Thread = null,
     worker_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -43,6 +46,7 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         self.waitForWorker();
         self.freeDiscovered();
+        runtime.freeOptions(self.allocator, self.runtimes);
         self.process_log.deinit();
         if (self.custom_model_path.len > 0) self.allocator.free(self.custom_model_path);
         if (self.custom_mmproj_path.len > 0) self.allocator.free(self.custom_mmproj_path);
@@ -54,6 +58,10 @@ pub const App = struct {
     pub fn bootstrap(self: *App) !void {
         self.setStatus(.loading_models, "Scanning for ASR models...");
         self.freeDiscovered();
+        runtime.freeOptions(self.allocator, self.runtimes);
+        self.runtimes = try runtime.discover(self.allocator);
+        self.selected_runtime = self.runtimes[0].id;
+
         self.discovered = try models.discover(self.allocator, .{});
         self.selected_index = null;
 
@@ -63,8 +71,10 @@ pub const App = struct {
             self.selected_index = 0;
         }
 
+        var saved_runtime: ?runtime.Id = null;
         if (try config.load(self.allocator)) |saved| {
             defer saved.deinit(self.allocator);
+            if (saved.runtime) |rt| saved_runtime = rt;
             if (models.findByModelPath(self.discovered.items, saved.model_path)) |idx| {
                 self.selected_index = idx;
             } else {
@@ -79,7 +89,18 @@ pub const App = struct {
             }
         }
 
+        if (saved_runtime) |rt| {
+            if (runtime.findOption(self.runtimes, rt)) |_| {
+                self.selected_runtime = rt;
+            }
+        }
+
         self.setStatus(.ready, "Ready");
+    }
+
+    pub fn selectRuntime(self: *App, id: runtime.Id) void {
+        if (runtime.findOption(self.runtimes, id) == null) return;
+        self.selected_runtime = id;
     }
 
     pub fn selectedModel(self: *const App) ?struct { model: []const u8, mmproj: []const u8, label: []const u8 } {
@@ -161,7 +182,11 @@ pub const App = struct {
         self.waitForWorker();
 
         const model = self.selectedModel().?;
-        try config.save(self.allocator, model.model, model.mmproj);
+        try config.save(self.allocator, .{
+            .model_path = model.model,
+            .mmproj_path = model.mmproj,
+            .runtime = self.selected_runtime,
+        });
 
         if (self.worker_err) |e| {
             self.allocator.free(e);
@@ -179,6 +204,7 @@ pub const App = struct {
             .mmproj_path = try self.allocator.dupeZ(u8, model.mmproj),
             .audio_path = try self.allocator.dupeZ(u8, self.audio_path),
             .output_path = try self.allocator.dupe(u8, self.output_path),
+            .runtime = self.selected_runtime,
         };
 
         self.worker = try std.Thread.spawn(.{}, workerMain, .{ctx});
@@ -256,6 +282,7 @@ const WorkerContext = struct {
     mmproj_path: [:0]u8,
     audio_path: [:0]u8,
     output_path: []u8,
+    runtime: runtime.Id,
 };
 
 const WorkerResult = union(enum) {
@@ -280,6 +307,7 @@ fn workerMain(ctx: *WorkerContext) void {
             .audio_path = ctx.audio_path,
             .log_buffer = &ctx.app.process_log,
             .cancel_flag = &ctx.app.cancel_requested,
+            .runtime = ctx.runtime,
         }) catch |err| {
             if (err == error.Cancelled) {
                 break :blk .{ .cancelled = {} };
