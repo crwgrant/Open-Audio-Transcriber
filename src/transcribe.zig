@@ -1,0 +1,175 @@
+const std = @import("std");
+
+const c = @cImport({
+    @cInclude("llama.h");
+    @cInclude("mtmd.h");
+    @cInclude("mtmd-helper.h");
+});
+
+pub const Options = struct {
+    model_path: [:0]const u8,
+    mmproj_path: [:0]const u8,
+    audio_path: [:0]const u8,
+    n_gpu_layers: c_int = -1,
+    n_threads: ?c_int = null,
+    max_tokens: c_int = 4096,
+};
+
+pub const Error = error{
+    BackendInitFailed,
+    ModelLoadFailed,
+    ContextCreateFailed,
+    MtmdInitFailed,
+    AudioLoadFailed,
+    PromptFormatFailed,
+    TokenizeFailed,
+    EvalFailed,
+    GenerationFailed,
+    UnsupportedAudio,
+} || std.mem.Allocator.Error;
+
+pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
+    c.llama_backend_init();
+    defer c.llama_backend_free();
+    _ = c.ggml_backend_load_all();
+
+    var mparams = c.llama_model_default_params();
+    mparams.n_gpu_layers = opts.n_gpu_layers;
+    const model = c.llama_model_load_from_file(opts.model_path.ptr, mparams) orelse return error.ModelLoadFailed;
+    defer c.llama_model_free(model);
+
+    var cparams = c.llama_context_default_params();
+    cparams.n_ctx = 8192;
+    cparams.n_batch = 512;
+    if (opts.n_threads) |n| {
+        cparams.n_threads = n;
+        cparams.n_threads_batch = n;
+    } else {
+        const cpu = std.Thread.getCpuCount() catch 4;
+        cparams.n_threads = @intCast(cpu);
+        cparams.n_threads_batch = @intCast(cpu);
+    }
+
+    const ctx = c.llama_init_from_model(model, cparams) orelse return error.ContextCreateFailed;
+    defer c.llama_free(ctx);
+
+    var mtmd_params = c.mtmd_context_params_default();
+    mtmd_params.use_gpu = true;
+    mtmd_params.n_threads = cparams.n_threads;
+    const mtmd_ctx = c.mtmd_init_from_file(opts.mmproj_path.ptr, model, mtmd_params) orelse return error.MtmdInitFailed;
+    defer c.mtmd_free(mtmd_ctx);
+
+    if (!c.mtmd_support_audio(mtmd_ctx)) return error.UnsupportedAudio;
+
+    const audio_bitmap = c.mtmd_helper_bitmap_init_from_file(mtmd_ctx, opts.audio_path.ptr, false) orelse return error.AudioLoadFailed;
+    defer c.mtmd_bitmap_free(audio_bitmap);
+
+    const marker = c.mtmd_default_marker();
+    const user_prompt = try std.fmt.allocPrint(allocator, "{s}Transcribe audio to text", .{std.mem.span(marker)});
+    defer allocator.free(user_prompt);
+
+    const formatted = try formatChatPrompt(allocator, model, user_prompt);
+    defer allocator.free(formatted);
+
+    const prompt_z = try allocator.dupeZ(u8, formatted);
+    defer allocator.free(prompt_z);
+
+    var text = c.mtmd_input_text{
+        .text = prompt_z.ptr,
+        .add_special = true,
+        .parse_special = true,
+    };
+
+    const chunks = c.mtmd_input_chunks_init() orelse return error.TokenizeFailed;
+    defer c.mtmd_input_chunks_free(chunks);
+
+    var bitmaps: [1]?*const c.mtmd_bitmap = .{audio_bitmap};
+    const tok_res = c.mtmd_tokenize(mtmd_ctx, chunks, &text, &bitmaps, 1);
+    if (tok_res != 0) return error.TokenizeFailed;
+
+    var n_past: c.llama_pos = 0;
+    const eval_res = c.mtmd_helper_eval_chunks(
+        mtmd_ctx,
+        ctx,
+        chunks,
+        0,
+        0,
+        @intCast(cparams.n_batch),
+        true,
+        &n_past,
+    );
+    if (eval_res != 0) return error.EvalFailed;
+
+    const vocab = c.llama_model_get_vocab(model);
+    const sampler = c.llama_sampler_chain_init(c.llama_sampler_chain_default_params());
+    defer c.llama_sampler_free(sampler);
+    c.llama_sampler_chain_add(sampler, c.llama_sampler_init_dist(0));
+
+    var batch = c.llama_batch_init(1, 0, 1);
+    defer c.llama_batch_free(batch);
+
+    var output = std.ArrayList(u8).empty;
+    errdefer output.deinit(allocator);
+
+    var i: c_int = 0;
+    while (i < opts.max_tokens) : (i += 1) {
+        const token = c.llama_sampler_sample(sampler, ctx, -1);
+        if (c.llama_vocab_is_eog(vocab, token)) break;
+        c.llama_sampler_accept(sampler, token);
+
+        var piece_buf: [256]u8 = undefined;
+        const n_piece = c.llama_token_to_piece(vocab, token, &piece_buf, piece_buf.len, 0, true);
+        if (n_piece > 0) {
+            try output.appendSlice(allocator, piece_buf[0..@intCast(n_piece)]);
+        }
+
+        batch.n_tokens = 1;
+        batch.token[0] = token;
+        batch.pos[0] = n_past;
+        batch.n_seq_id[0] = 1;
+        batch.seq_id[0][0] = 0;
+        batch.logits[0] = 1;
+        n_past += 1;
+
+        if (c.llama_decode(ctx, batch) != 0) return error.GenerationFailed;
+    }
+
+    while (output.items.len > 0 and std.ascii.isWhitespace(output.items[output.items.len - 1])) {
+        _ = output.pop();
+    }
+
+    const raw = try output.toOwnedSlice(allocator);
+    return cleanAsrOutput(allocator, raw);
+}
+
+fn cleanAsrOutput(allocator: std.mem.Allocator, raw: []u8) Error![]u8 {
+    defer allocator.free(raw);
+
+    const marker = "<asr_text>";
+    if (std.mem.indexOf(u8, raw, marker)) |idx| {
+        const start = idx + marker.len;
+        return try allocator.dupe(u8, std.mem.trim(u8, raw[start..], &std.ascii.whitespace));
+    }
+
+    return try allocator.dupe(u8, std.mem.trim(u8, raw, &std.ascii.whitespace));
+}
+
+fn formatChatPrompt(allocator: std.mem.Allocator, model: *c.llama_model, user_content: []const u8) Error![]u8 {
+    const tmpl = c.llama_model_chat_template(model, null);
+    if (tmpl == null) {
+        return try allocator.dupe(u8, user_content);
+    }
+
+    const user_z = try allocator.dupeZ(u8, user_content);
+    defer allocator.free(user_z);
+
+    var msg = c.llama_chat_message{
+        .role = "user",
+        .content = user_z.ptr,
+    };
+
+    var buf: [16384]u8 = undefined;
+    const written = c.llama_chat_apply_template(tmpl, &msg, 1, true, &buf, @intCast(buf.len));
+    if (written < 0) return error.PromptFormatFailed;
+    return try allocator.dupe(u8, buf[0..@intCast(written)]);
+}

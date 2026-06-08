@@ -1,0 +1,8 @@
+lib/nativefiledialog/build
+lib/nativefiledialog/README.md
+lib/nativefiledialog/test
+lib/nativefiledialog/screens
+lib/nativefiledialog/docs
+lib/nativefiledialog/.github
+zig-cache/
+zig-out/

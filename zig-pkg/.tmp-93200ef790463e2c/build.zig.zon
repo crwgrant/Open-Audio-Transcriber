@@ -1,0 +1,16 @@
+.{
+	.name = "osdialog",
+	.version = "0.1.0",
+	.dependencies = .{
+		.osdialog = .{
+			.url = "https://github.com/ttytm/osdialog/archive/989a270.tar.gz",
+			.hash = "1220f0e1adfbc7648d2d47d6e6a8b722b9c9e02329c29f1f33afa2997844217fffe6",
+		},
+	},
+	.paths = .{
+		"build.zig",
+		"build.zig.zon",
+		"src",
+		"LICENSE",
+	},
+}
