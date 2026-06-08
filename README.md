@@ -117,6 +117,10 @@ For distribution outside your Mac, notarize the signed `.app` with Apple after p
 3. Choose an output `.txt` path (defaults to `<audio-stem>.txt`).
 4. Click **Transcribe**.
 
+## Agent / handoff context
+
+For continuing development on another machine (e.g. Windows port), see **[docs/AGENT_CONTEXT.md](docs/AGENT_CONTEXT.md)** — architecture, macOS fixes, and Windows port checklist.
+
 ## Notes
 
 - llama.cpp.zig upstream targets Zig 0.14 and an older llama.cpp without ASR. This project vendors llama.cpp.zig but uses a current llama.cpp submodule and links `libmtmd` built by CMake.
