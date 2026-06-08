@@ -1,5 +1,6 @@
 const std = @import("std");
 const io_util = @import("io_util.zig");
+const paths = @import("paths.zig");
 
 pub const Config = struct {
     model_path: []const u8,
@@ -12,8 +13,8 @@ pub const Config = struct {
 };
 
 pub fn configPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = std.c.getenv("HOME") orelse return error.HomeNotFound;
-    const home_slice = std.mem.span(home);
+    const home_slice = try paths.homeDir(allocator);
+    defer allocator.free(home_slice);
     const dir = try std.fs.path.join(allocator, &.{ home_slice, ".config", "audio-transcriber" });
     defer allocator.free(dir);
     try std.Io.Dir.createDirPath(.cwd(), io_util.io(), dir);
@@ -27,7 +28,7 @@ pub fn load(allocator: std.mem.Allocator) !?Config {
     const data = io_util.readFileSmall(allocator, path, 1024 * 1024) catch return null;
     defer allocator.free(data);
 
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return null;
     defer parsed.deinit();
 
     const root = parsed.value.object;
@@ -41,14 +42,20 @@ pub fn load(allocator: std.mem.Allocator) !?Config {
     };
 }
 
+const SavedConfig = struct {
+    model_path: []const u8,
+    mmproj_path: []const u8,
+};
+
 pub fn save(allocator: std.mem.Allocator, model_path: []const u8, mmproj_path: []const u8) !void {
     const path = try configPath(allocator);
     defer allocator.free(path);
 
-    var buf: [4096]u8 = undefined;
-    const json = try std.fmt.bufPrint(&buf,
-        \\{{"model_path":"{s}","mmproj_path":"{s}"}}
-    , .{ model_path, mmproj_path });
+    const json = try std.json.Stringify.valueAlloc(allocator, SavedConfig{
+        .model_path = model_path,
+        .mmproj_path = mmproj_path,
+    }, .{});
+    defer allocator.free(json);
 
     try io_util.writeFileAbsolute(path, json);
 }
