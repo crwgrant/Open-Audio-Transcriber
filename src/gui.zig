@@ -204,10 +204,28 @@ fn drawStatusSection(app: *app_mod.App, log_buf: *[262144:0]u8) void {
     zgui.textColored(color, "{s}", .{app.status_message});
 
     zgui.text("Log", .{});
+    zgui.sameLine(.{});
+    const log_busy = app.status == .transcribing;
+    if (log_busy) zgui.beginDisabled(.{});
+    if (zgui.button("Clear log", .{})) {
+        app.clearLog();
+        log_buf[0] = 0;
+    }
+    if (log_busy) zgui.endDisabled();
+
     app.process_log.copyTo(log_buf);
-    if (zgui.beginChild("##log_panel", .{ .w = 0, .h = 180 })) {
+
+    const avail = zgui.getContentRegionAvail();
+    const log_h = @max(avail[1], 120);
+    if (zgui.beginChild("##log_panel", .{
+        .w = avail[0],
+        .h = log_h,
+        .window_flags = .{ .no_scrollbar = true },
+    })) {
         _ = zgui.inputTextMultiline("##process_log", .{
             .buf = log_buf,
+            .w = -1,
+            .h = -1,
             .flags = .{ .read_only = true },
         });
         if (app.status == .transcribing) {

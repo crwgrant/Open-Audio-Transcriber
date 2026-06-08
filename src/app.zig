@@ -28,6 +28,9 @@ pub const App = struct {
     last_transcript: []const u8 = "",
     process_log: log.Buffer,
     worker: ?std.Thread = null,
+    worker_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    worker_mutex: std.Io.Mutex = std.Io.Mutex.init,
+    pending_result: ?WorkerResult = null,
     worker_err: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) App {
@@ -143,6 +146,11 @@ pub const App = struct {
             self.output_path.len > 0;
     }
 
+    pub fn clearLog(self: *App) void {
+        if (self.status == .transcribing) return;
+        self.process_log.clear();
+    }
+
     pub fn startTranscription(self: *App) !void {
         if (!self.canTranscribe()) return error.InvalidState;
         self.waitForWorker();
@@ -156,8 +164,7 @@ pub const App = struct {
         }
 
         self.setStatus(.transcribing, "Transcribing audio...");
-        self.process_log.clear();
-        self.process_log.appendFmt("Starting transcription...", .{});
+        self.process_log.appendFmt("--- Starting transcription ---", .{});
 
         const ctx = try self.allocator.create(WorkerContext);
         ctx.* = .{
@@ -172,14 +179,37 @@ pub const App = struct {
     }
 
     pub fn poll(self: *App) void {
-        self.waitForWorker();
+        if (self.worker == null) return;
+        if (!self.worker_done.load(.acquire)) return;
+        self.finishWorker();
     }
 
     fn waitForWorker(self: *App) void {
+        while (self.worker != null) {
+            if (self.worker_done.load(.acquire)) {
+                self.finishWorker();
+            } else {
+                std.Thread.yield() catch {};
+            }
+        }
+    }
+
+    fn finishWorker(self: *App) void {
+        const io = io_util.io();
+        self.worker_mutex.lockUncancelable(io);
+        const result = self.pending_result orelse {
+            self.worker_mutex.unlock(io);
+            return;
+        };
+        self.pending_result = null;
+        self.worker_mutex.unlock(io);
+
         if (self.worker) |t| {
             t.join();
             self.worker = null;
         }
+        self.worker_done.store(false, .release);
+        self.onWorkerDone(result);
     }
 
     fn setStatus(self: *App, status: Status, message: []const u8) void {
@@ -257,5 +287,9 @@ fn workerMain(ctx: *WorkerContext) void {
         break :blk .{ .success = text };
     };
 
-    ctx.app.onWorkerDone(result);
+    const io = io_util.io();
+    ctx.app.worker_mutex.lockUncancelable(io);
+    ctx.app.pending_result = result;
+    ctx.app.worker_mutex.unlock(io);
+    ctx.app.worker_done.store(true, .release);
 }
