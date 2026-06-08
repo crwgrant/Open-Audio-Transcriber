@@ -3,4 +3,4 @@ zig-out/
 .DS_Store
 *.o
 *.a
-zig-out/Audio Transcriber.app/
+tools/ninja-win.zip

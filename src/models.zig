@@ -1,5 +1,6 @@
 const std = @import("std");
 const io_util = @import("io_util.zig");
+const paths = @import("paths.zig");
 
 pub const AsrModel = struct {
     label: [:0]const u8,
@@ -21,8 +22,8 @@ pub fn defaultSearchRoots() []const []const u8 {
 }
 
 pub fn defaultModelPaths(allocator: std.mem.Allocator) !struct { model: []const u8, mmproj: []const u8 } {
-    const home = std.c.getenv("HOME") orelse return error.HomeNotFound;
-    const home_slice = std.mem.span(home);
+    const home_slice = try paths.homeDir(allocator);
+    defer allocator.free(home_slice);
     const base = try std.fs.path.join(allocator, &.{ home_slice, ".lmstudio", "models", "ggml-org", "Qwen3-ASR-1.7B-GGUF" });
     defer allocator.free(base);
 
@@ -33,8 +34,8 @@ pub fn defaultModelPaths(allocator: std.mem.Allocator) !struct { model: []const 
 }
 
 pub fn discover(allocator: std.mem.Allocator, opts: DiscoverOptions) !std.ArrayList(AsrModel) {
-    const home = std.c.getenv("HOME") orelse return error.HomeNotFound;
-    const home_slice = std.mem.span(home);
+    const home_slice = try paths.homeDir(allocator);
+    defer allocator.free(home_slice);
     var models = std.ArrayList(AsrModel).empty;
     errdefer freeAll(allocator, &models);
 

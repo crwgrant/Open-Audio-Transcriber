@@ -1,9 +1,9 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const c = @cImport({
-    @cInclude("llama.h");
-    @cInclude("mtmd.h");
-    @cInclude("mtmd-helper.h");
+    @cDefine("UINTPTR_MAX", "0xFFFFFFFFFFFFFFFF");
+    @cInclude("llama_c.h");
 });
 
 pub const Options = struct {
@@ -34,7 +34,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     _ = c.ggml_backend_load_all();
 
     var mparams = c.llama_model_default_params();
-    mparams.n_gpu_layers = opts.n_gpu_layers;
+    mparams.n_gpu_layers = if (cpuOnly()) 0 else opts.n_gpu_layers;
     const model = c.llama_model_load_from_file(opts.model_path.ptr, mparams) orelse return error.ModelLoadFailed;
     defer c.llama_model_free(model);
 
@@ -54,7 +54,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     defer c.llama_free(ctx);
 
     var mtmd_params = c.mtmd_context_params_default();
-    mtmd_params.use_gpu = true;
+    mtmd_params.use_gpu = !cpuOnly();
     mtmd_params.n_threads = cparams.n_threads;
     const mtmd_ctx = c.mtmd_init_from_file(opts.mmproj_path.ptr, model, mtmd_params) orelse return error.MtmdInitFailed;
     defer c.mtmd_free(mtmd_ctx);
@@ -172,4 +172,8 @@ fn formatChatPrompt(allocator: std.mem.Allocator, model: *c.llama_model, user_co
     const written = c.llama_chat_apply_template(tmpl, &msg, 1, true, &buf, @intCast(buf.len));
     if (written < 0) return error.PromptFormatFailed;
     return try allocator.dupe(u8, buf[0..@intCast(written)]);
+}
+
+fn cpuOnly() bool {
+    return builtin.os.tag == .windows;
 }
