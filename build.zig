@@ -2,18 +2,39 @@ const std = @import("std");
 
 const llama_root = "deps/llama.cpp.zig/llama.cpp";
 
-fn cmakeBuildDir(os: std.Target.Os.Tag) []const u8 {
+fn cmakeBuildDir(os: std.Target.Os.Tag, cpu_baseline: bool) []const u8 {
     return switch (os) {
-        .windows => ".zig-cache/llama-cpp-win",
+        .windows => if (cpu_baseline) ".zig-cache/llama-cpp-win-baseline" else ".zig-cache/llama-cpp-win",
         else => ".zig-cache/llama-cpp",
     };
 }
 
+fn resolveAppTarget(b: *std.Build, cpu_baseline: bool) std.Build.ResolvedTarget {
+    if (cpu_baseline) {
+        if (b.graph.host.result.cpu.arch != .x86_64) {
+            std.debug.panic("-Dcpu-baseline=true requires an x86_64 host", .{});
+        }
+        return b.resolveTargetQuery(.{
+            .cpu_arch = .x86_64,
+            .os_tag = b.graph.host.result.os.tag,
+            .abi = if (b.graph.host.result.os.tag == .windows) .gnu else .none,
+            .cpu_model = .baseline,
+        });
+    }
+    return b.standardTargetOptions(.{});
+}
+
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const host_os = b.graph.host.result.os.tag;
+
+    const enable_vulkan = b.option(bool, "ggml-vulkan", "Build llama.cpp with Vulkan backend (Windows only; requires Vulkan SDK)") orelse false;
+    const cpu_baseline = b.option(bool, "cpu-baseline", "Portable x86_64 build without -march=native (use when copying the .exe to other PCs)") orelse false;
+
+    const target = resolveAppTarget(b, cpu_baseline);
     const target_os = target.result.os.tag;
+
+    const llama_step = addLlamaCppBuild(b, optimize, host_os, enable_vulkan, cpu_baseline);
 
     if (host_os != target_os) {
         std.debug.panic("cross-compilation is not supported (host {s}, target {s})", .{
@@ -21,10 +42,6 @@ pub fn build(b: *std.Build) void {
             @tagName(target_os),
         });
     }
-
-    const enable_vulkan = b.option(bool, "ggml-vulkan", "Build llama.cpp with Vulkan backend (Windows only; requires Vulkan SDK)") orelse false;
-
-    const llama_step = addLlamaCppBuild(b, optimize, host_os, enable_vulkan);
 
     const root_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -51,7 +68,7 @@ pub fn build(b: *std.Build) void {
     addPlatformDeps(root_mod, b, target_os);
     addLlamaIncludes(root_mod, b);
     root_mod.addIncludePath(.{ .cwd_relative = b.pathFromRoot("src") });
-    addLlamaLibs(root_mod, b, host_os, enable_vulkan);
+    addLlamaLibs(root_mod, b, host_os, enable_vulkan, cpu_baseline);
 
     const zglfw = b.dependency("zglfw", .{
         .target = target,
@@ -131,11 +148,11 @@ fn addVulkanShadersToolchain(b: *std.Build, tools: []const u8) struct { step: *s
     };
 }
 
-fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.Target.Os.Tag, enable_vulkan: bool) *std.Build.Step {
+fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.Target.Os.Tag, enable_vulkan: bool, cpu_baseline: bool) *std.Build.Step {
     const config_name = cmakeConfigName(optimize);
 
     const cmake = resolveCmakePath(b);
-    const build_dir = cmakeBuildDir(os);
+    const build_dir = cmakeBuildDir(os, cpu_baseline);
 
     var configure_args = std.ArrayList([]const u8).empty;
     defer configure_args.deinit(b.allocator);
@@ -176,6 +193,7 @@ fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.T
                 b.fmt("-DCMAKE_BUILD_TYPE={s}", .{config_name}),
                 "-DGGML_METAL=OFF",
                 if (enable_vulkan) "-DGGML_VULKAN=ON" else "-DGGML_VULKAN=OFF",
+                if (cpu_baseline) "-DGGML_NATIVE=OFF" else "-DGGML_NATIVE=ON",
             }) catch @panic("OOM");
             if (enable_vulkan) {
                 const vulkan_sdk = b.graph.environ_map.get("VULKAN_SDK") orelse {
@@ -196,7 +214,6 @@ fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.T
                 };
                 configure_args.appendSlice(b.allocator, &.{
                     b.fmt("-DCMAKE_PREFIX_PATH={s}", .{vulkan_sdk}),
-                    "-DGGML_NATIVE=ON",
                 }) catch @panic("OOM");
                 const toolchain = addVulkanShadersToolchain(b, tools);
                 vulkan_toolchain_step = toolchain.step;
@@ -351,8 +368,8 @@ fn addMacPackageStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
     package_step.dependOn(&sign_app.step);
 }
 
-fn addLlamaLibs(mod: *std.Build.Module, b: *std.Build, os: std.Target.Os.Tag, enable_vulkan: bool) void {
-    const build_dir = cmakeBuildDir(os);
+fn addLlamaLibs(mod: *std.Build.Module, b: *std.Build, os: std.Target.Os.Tag, enable_vulkan: bool, cpu_baseline: bool) void {
+    const build_dir = cmakeBuildDir(os, cpu_baseline);
     switch (os) {
         .macos => {
             const libs = [_][]const u8{

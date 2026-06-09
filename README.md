@@ -67,6 +67,17 @@ zig build -Doptimize=ReleaseFast
 zig build run -Doptimize=ReleaseFast
 ```
 
+### Copying the .exe to another PC
+
+Release builds use `-march=native` for llama.cpp CPU code, so an `.exe` built on one PC may crash on another with **illegal instruction** (`0xc000001d`) at startup. Rebuild with a portable CPU baseline before copying:
+
+```powershell
+$env:VULKAN_SDK = "C:/VulkanSDK/1.4.350.0"   # if using Vulkan
+zig build -Dcpu-baseline=true -Dggml-vulkan=true -Doptimize=ReleaseFast
+```
+
+Copy `zig-out\bin\audio-transcriber.exe` (and `audio-transcriber.pdb` if you want crash symbols). The target PC still needs up-to-date GPU drivers for Vulkan; CPU-only builds have no extra runtime dependencies.
+
 ## Package (standalone macOS app)
 
 Build a release `.app` bundle you can copy to `/Applications`:
