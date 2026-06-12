@@ -46,6 +46,12 @@ pub const Id = enum {
     pub fn useGpu(self: Id) bool {
         return self != .cpu;
     }
+
+    /// Multimodal projector (audio/vision encoder). Vulkan on Linux/Windows is unreliable for CLIP;
+    /// keep the encoder on CPU and offload the text model via `n_gpu_layers` instead.
+    pub fn useGpuForMmproj(self: Id) bool {
+        return self == .metal;
+    }
 };
 
 pub const Option = struct {
@@ -54,9 +60,9 @@ pub const Option = struct {
 };
 
 const platform_candidates = switch (builtin.os.tag) {
-    .windows => &[_]Id{ .cpu, .vulkan },
+    .windows, .linux => &[_]Id{ .cpu, .vulkan },
     .macos => &[_]Id{ .cpu, .metal },
-    else => &[_]Id{ .cpu},
+    else => &[_]Id{ .cpu },
 };
 
 /// Initialize ggml backends and return runtimes allowed on this OS that are linked and working.
