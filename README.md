@@ -67,6 +67,34 @@ zig build -Doptimize=ReleaseFast
 zig build run -Doptimize=ReleaseFast
 ```
 
+### Linux (Vulkan GPU)
+
+Install Vulkan development packages (Arch/CachyOS example):
+
+```bash
+sudo pacman -S vulkan-devel glslang spirv-headers
+```
+
+Then build with the Vulkan backend:
+
+```bash
+zig build -Dggml-vulkan=true -Doptimize=ReleaseFast
+zig build run -Dggml-vulkan=true -Doptimize=ReleaseFast
+```
+
+If you use the LunarG Vulkan SDK instead of system packages, set `VULKAN_SDK` when building. The first Vulkan build is slower (shader compilation). Use the **Runtime** dropdown in the app to pick CPU or Vulkan.
+
+Vulkan runs the text model on the GPU; the audio encoder (mmproj) stays on CPU for stability.
+
+Context size is chosen automatically from audio length (long files need a larger context — about 12 minutes of audio uses ~18k tokens).
+
+CPU-only on Linux:
+
+```bash
+zig build -Doptimize=ReleaseFast
+zig build run -Doptimize=ReleaseFast
+```
+
 ### Copying the .exe to another PC
 
 Release builds use `-march=native` for llama.cpp CPU code, so an `.exe` built on one PC may crash on another with **illegal instruction** (`0xc000001d`) at startup. Rebuild with a portable CPU baseline before copying:
@@ -154,5 +182,5 @@ For continuing development on another machine (e.g. Windows port), see **[docs/A
 ## Notes
 
 - llama.cpp.zig upstream targets Zig 0.14 and an older llama.cpp without ASR. This project vendors llama.cpp.zig but uses a current llama.cpp submodule and links `libmtmd` built by CMake.
-- GPU acceleration uses Metal on macOS (`-DGGML_METAL=ON`) or Vulkan on Windows (`-Dggml-vulkan=true`, requires Vulkan SDK).
+- GPU acceleration uses Metal on macOS (`-DGGML_METAL=ON`), or Vulkan on Windows and Linux (`-Dggml-vulkan=true`; Windows needs Vulkan SDK, Linux needs system Vulkan dev packages or `VULKAN_SDK`).
 - Audio transcription in llama.cpp is still marked experimental upstream.

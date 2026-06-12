@@ -23,6 +23,7 @@ pub const Error = error{
     BackendInitFailed,
     ModelLoadFailed,
     ContextCreateFailed,
+    ContextTooLarge,
     MtmdInitFailed,
     AudioLoadFailed,
     PromptFormatFailed,
@@ -42,22 +43,58 @@ fn checkCancelled(cancel_flag: ?*std.atomic.Value(bool)) Error!void {
     if (isCancelled(cancel_flag)) return error.Cancelled;
 }
 
-fn checkEvalResult(res: c_int, cancel_flag: ?*std.atomic.Value(bool)) Error!void {
+fn checkEvalResult(res: c_int, cancel_flag: ?*std.atomic.Value(bool), log_buffer: ?*log.Buffer) Error!void {
     if (res == 0) return;
     try checkCancelled(cancel_flag);
     if (res == 2) return error.Cancelled;
+    if (log_buffer) |buf| {
+        buf.appendFmt("Inference eval failed (code {d})", .{res});
+        switch (res) {
+            1 => buf.append(" — KV cache could not fit this batch (context may be too small for this audio)"),
+            -2 => buf.append(" — GPU memory allocation failed"),
+            -3 => buf.append(" — GPU compute failed"),
+            else => {},
+        }
+    }
     return error.EvalFailed;
 }
 
-fn checkGenerationResult(res: c_int, cancel_flag: ?*std.atomic.Value(bool)) Error!void {
+fn checkGenerationResult(res: c_int, cancel_flag: ?*std.atomic.Value(bool), log_buffer: ?*log.Buffer) Error!void {
     if (res == 0) return;
     try checkCancelled(cancel_flag);
     if (res == 2) return error.Cancelled;
+    if (log_buffer) |buf| buf.appendFmt("Token generation failed (code {d})", .{res});
     return error.GenerationFailed;
+}
+
+threadlocal var active_log_buffer: ?*log.Buffer = null;
+
+export fn llamaLogCallback(level: c_uint, text: [*c]const u8, _: ?*anyopaque) callconv(.c) void {
+    if (level < 3) return; // WARN and ERROR only
+    if (active_log_buffer) |buf| buf.append(std.mem.span(text));
+}
+
+fn threadCount(opts: Options) c_int {
+    if (opts.n_threads) |n| return n;
+    return @intCast(std.Thread.getCpuCount() catch 4);
+}
+
+fn requiredContextSize(model: *c.llama_model, chunks: *c.mtmd_input_chunks, max_gen: c_int) Error!u32 {
+    const n_pos = c.mtmd_helper_get_n_pos(chunks);
+    const model_max = c.llama_model_n_ctx_train(model);
+    const required = @as(i64, n_pos) + max_gen + 256;
+    if (required > model_max) return error.ContextTooLarge;
+    const min_ctx: u32 = 8192;
+    const sized = @as(u32, @intCast(required));
+    return @max(sized, min_ctx);
 }
 
 pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     try checkCancelled(opts.cancel_flag);
+
+    active_log_buffer = opts.log_buffer;
+    defer active_log_buffer = null;
+    if (opts.log_buffer != null) c.llama_log_set(llamaLogCallback, null);
 
     c.llama_backend_init();
     defer c.llama_backend_free();
@@ -78,31 +115,19 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     defer c.llama_model_free(model);
     try checkCancelled(opts.cancel_flag);
 
-    var cparams = c.llama_context_default_params();
-    cparams.n_ctx = 8192;
-    cparams.n_batch = 512;
-    cparams.no_perf = false;
-    if (opts.n_threads) |n| {
-        cparams.n_threads = n;
-        cparams.n_threads_batch = n;
-    } else {
-        const cpu = std.Thread.getCpuCount() catch 4;
-        cparams.n_threads = @intCast(cpu);
-        cparams.n_threads_batch = @intCast(cpu);
-    }
-
-    const ctx = c.llama_init_from_model(model, cparams) orelse return error.ContextCreateFailed;
-    defer c.llama_free(ctx);
-    if (opts.cancel_flag) |flag| {
-        c.llama_set_abort_callback(ctx, llamaAbortCallback, @ptrCast(flag));
-    }
-    if (opts.log_buffer) |buf| buf.appendFmt("Model loaded. Processing audio: {s}", .{opts.audio_path});
-    try checkCancelled(opts.cancel_flag);
+    const n_threads = threadCount(opts);
+    const decode_batch: u32 = switch (opts.runtime) {
+        .vulkan => 256,
+        else => 512,
+    };
 
     var mtmd_params = c.mtmd_context_params_default();
-    mtmd_params.use_gpu = opts.runtime.useGpu();
-    mtmd_params.n_threads = cparams.n_threads;
+    mtmd_params.use_gpu = opts.runtime.useGpuForMmproj();
+    mtmd_params.n_threads = n_threads;
     mtmd_params.print_timings = false;
+    if (opts.runtime == .vulkan) {
+        mtmd_params.flash_attn_type = c.LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    }
     if (opts.cancel_flag) |flag| {
         mtmd_params.cb_eval = mtmdEvalCallback;
         mtmd_params.cb_eval_user_data = @ptrCast(flag);
@@ -112,7 +137,11 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
 
     if (!c.mtmd_support_audio(mtmd_ctx)) return error.UnsupportedAudio;
 
-    const audio_bitmap = c.mtmd_helper_bitmap_init_from_file(mtmd_ctx, opts.audio_path.ptr, false) orelse return error.AudioLoadFailed;
+    if (opts.log_buffer) |buf| buf.appendFmt("Processing audio: {s}", .{opts.audio_path});
+
+    const audio_wrapper = c.mtmd_helper_bitmap_init_from_file(mtmd_ctx, opts.audio_path.ptr, false);
+    const audio_bitmap = audio_wrapper.bitmap;
+    if (audio_bitmap == null) return error.AudioLoadFailed;
     defer c.mtmd_bitmap_free(audio_bitmap);
     try checkCancelled(opts.cancel_flag);
 
@@ -139,9 +168,33 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     const tok_res = c.mtmd_tokenize(mtmd_ctx, chunks, &text, &bitmaps, 1);
     if (tok_res != 0) return error.TokenizeFailed;
 
+    const n_ctx = try requiredContextSize(model, chunks, opts.max_tokens);
+    if (opts.log_buffer) |buf| {
+        buf.appendFmt(
+            "Prompt+audio positions: {d}, context size: {d} tokens",
+            .{ c.mtmd_helper_get_n_pos(chunks), n_ctx },
+        );
+    }
+
+    var cparams = c.llama_context_default_params();
+    cparams.n_ctx = n_ctx;
+    cparams.n_batch = decode_batch;
+    cparams.n_ubatch = decode_batch;
+    cparams.no_perf = false;
+    cparams.n_threads = n_threads;
+    cparams.n_threads_batch = n_threads;
+
+    const ctx = c.llama_init_from_model(model, cparams) orelse return error.ContextCreateFailed;
+    defer c.llama_free(ctx);
+    if (opts.cancel_flag) |flag| {
+        c.llama_set_abort_callback(ctx, llamaAbortCallback, @ptrCast(flag));
+    }
+    if (opts.log_buffer) |buf| buf.append("Model and context ready");
+    try checkCancelled(opts.cancel_flag);
+
     var n_past: c.llama_pos = 0;
     const n_chunks = c.mtmd_input_chunks_size(chunks);
-    const n_batch: c_int = @intCast(cparams.n_batch);
+    const n_batch: c_int = @intCast(decode_batch);
     var i_chunk: usize = 0;
     while (i_chunk < n_chunks) : (i_chunk += 1) {
         try checkCancelled(opts.cancel_flag);
@@ -157,7 +210,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
             chunk_logits_last,
             &n_past,
         );
-        try checkEvalResult(eval_res, opts.cancel_flag);
+        try checkEvalResult(eval_res, opts.cancel_flag, opts.log_buffer);
     }
     try checkCancelled(opts.cancel_flag);
 
@@ -194,7 +247,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
         batch.logits[0] = 1;
         n_past += 1;
 
-        try checkGenerationResult(c.llama_decode(ctx, batch), opts.cancel_flag);
+        try checkGenerationResult(c.llama_decode(ctx, batch), opts.cancel_flag, opts.log_buffer);
     }
 
     if (opts.log_buffer) |buf| appendPerfStats(buf, ctx);

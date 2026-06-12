@@ -2,11 +2,93 @@ const std = @import("std");
 
 const llama_root = "deps/llama.cpp.zig/llama.cpp";
 
-fn cmakeBuildDir(os: std.Target.Os.Tag, cpu_baseline: bool) []const u8 {
+fn cmakeBuildDir(os: std.Target.Os.Tag, cpu_baseline: bool, enable_vulkan: bool) []const u8 {
     return switch (os) {
         .windows => if (cpu_baseline) ".zig-cache/llama-cpp-win-baseline" else ".zig-cache/llama-cpp-win",
+        .linux => if (enable_vulkan)
+            if (cpu_baseline) ".zig-cache/llama-cpp-linux-vulkan-baseline" else ".zig-cache/llama-cpp-linux-vulkan"
+        else if (cpu_baseline) ".zig-cache/llama-cpp-linux-baseline" else ".zig-cache/llama-cpp-linux",
         else => ".zig-cache/llama-cpp",
     };
+}
+
+fn pkgConfigOutput(b: *std.Build, args: []const []const u8) []const u8 {
+    const result = std.process.run(b.allocator, b.graph.io, .{ .argv = args }) catch {
+        std.debug.panic("failed to run pkg-config", .{});
+    };
+    switch (result.term) {
+        .exited => |code| if (code != 0) std.debug.panic("pkg-config failed: {s}", .{result.stderr}),
+        else => std.debug.panic("pkg-config failed: {s}", .{result.stderr}),
+    }
+    return std.mem.trim(u8, result.stdout, " \t\r\n");
+}
+
+fn applyPkgConfigLibs(mod: *std.Build.Module, b: *std.Build, package: []const u8) void {
+    const libs_output = pkgConfigOutput(b, &.{ "pkg-config", "--libs", package });
+    const lib_flags = splitFlags(b, libs_output);
+    for (lib_flags) |flag| {
+        if (std.mem.startsWith(u8, flag, "-l")) {
+            mod.linkSystemLibrary(flag[2..], .{ .use_pkg_config = .no });
+        } else if (std.mem.startsWith(u8, flag, "-L")) {
+            mod.addLibraryPath(.{ .cwd_relative = flag[2..] });
+        }
+    }
+}
+
+fn splitFlags(b: *std.Build, output: []const u8) [][]const u8 {
+    if (output.len == 0) return &.{};
+    var flags: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, output, ' ');
+    while (it.next()) |flag| {
+        if (flag.len > 0) flags.append(b.allocator, flag) catch @panic("OOM");
+    }
+    return flags.toOwnedSlice(b.allocator) catch @panic("OOM");
+}
+
+fn fileExistsAbsolute(b: *std.Build, path: []const u8) bool {
+    return if (std.Io.Dir.accessAbsolute(b.graph.io, path, .{})) |_| true else |_| false;
+}
+
+fn appendLinuxVulkanCmakeArgs(b: *std.Build, configure_args: *std.ArrayList([]const u8)) void {
+    if (b.graph.environ_map.get("VULKAN_SDK")) |vulkan_sdk| {
+        configure_args.append(b.allocator, b.fmt("-DCMAKE_PREFIX_PATH={s}", .{vulkan_sdk})) catch @panic("OOM");
+        return;
+    }
+
+    if (fileExistsAbsolute(b, "/usr/include/vulkan/vulkan.h")) {
+        configure_args.append(b.allocator, "-DVulkan_INCLUDE_DIR=/usr/include") catch @panic("OOM");
+    } else {
+        std.debug.panic(
+            \\-Dggml-vulkan=true on Linux requires Vulkan headers.
+            \\
+            \\Install dev packages (Arch/CachyOS example):
+            \\  sudo pacman -S vulkan-headers glslang spirv-headers
+            \\
+            \\Or set VULKAN_SDK to a LunarG Vulkan SDK install directory.
+            ,
+            .{},
+        );
+    }
+
+    const spirv_config_paths = [_][]const u8{
+        "/usr/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake",
+        "/usr/lib/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake",
+    };
+    for (spirv_config_paths) |config| {
+        if (fileExistsAbsolute(b, config)) {
+            configure_args.append(b.allocator, "-DCMAKE_PREFIX_PATH=/usr") catch @panic("OOM");
+            return;
+        }
+    }
+
+    std.debug.panic(
+        \\-Dggml-vulkan=true on Linux requires SPIRV-Headers (cmake package).
+        \\
+        \\Arch/CachyOS:
+        \\  sudo pacman -S spirv-headers
+        ,
+        .{},
+    );
 }
 
 fn resolveAppTarget(b: *std.Build, cpu_baseline: bool) std.Build.ResolvedTarget {
@@ -28,7 +110,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const host_os = b.graph.host.result.os.tag;
 
-    const enable_vulkan = b.option(bool, "ggml-vulkan", "Build llama.cpp with Vulkan backend (Windows only; requires Vulkan SDK)") orelse false;
+    const enable_vulkan = b.option(
+        bool,
+        "ggml-vulkan",
+        "Build llama.cpp with Vulkan backend (requires Vulkan SDK or system Vulkan dev packages)",
+    ) orelse false;
     const cpu_baseline = b.option(bool, "cpu-baseline", "Portable x86_64 build without -march=native (use when copying the .exe to other PCs)") orelse false;
 
     const target = resolveAppTarget(b, cpu_baseline);
@@ -63,6 +149,12 @@ pub fn build(b: *std.Build) void {
         };
     }
 
+    if (target_os == .linux) {
+        // Zig 0.16's self-hosted linker cannot handle GCC 15+/16 crt1.o SFrame sections.
+        exe.use_llvm = true;
+        root_mod.addRPathSpecial("$ORIGIN/../lib");
+    }
+
     exe.step.dependOn(llama_step);
 
     addPlatformDeps(root_mod, b, target_os);
@@ -73,6 +165,7 @@ pub fn build(b: *std.Build) void {
     const zglfw = b.dependency("zglfw", .{
         .target = target,
         .optimize = optimize,
+        .shared = target_os == .linux,
     });
     const zopengl = b.dependency("zopengl", .{});
     const zgui = b.dependency("zgui", .{
@@ -88,6 +181,7 @@ pub fn build(b: *std.Build) void {
     root_mod.linkLibrary(zglfw.artifact("glfw"));
     root_mod.linkLibrary(zgui.artifact("imgui"));
 
+    b.installArtifact(zglfw.artifact("glfw"));
     b.installArtifact(exe);
     addPackageStep(b, exe, target_os);
 
@@ -152,7 +246,7 @@ fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.T
     const config_name = cmakeConfigName(optimize);
 
     const cmake = resolveCmakePath(b);
-    const build_dir = cmakeBuildDir(os, cpu_baseline);
+    const build_dir = cmakeBuildDir(os, cpu_baseline, enable_vulkan);
 
     var configure_args = std.ArrayList([]const u8).empty;
     defer configure_args.deinit(b.allocator);
@@ -175,6 +269,20 @@ fn addLlamaCppBuild(b: *std.Build, optimize: std.builtin.OptimizeMode, os: std.T
                 b.fmt("-DCMAKE_BUILD_TYPE={s}", .{config_name}),
                 "-DGGML_METAL=ON",
             }) catch @panic("OOM");
+        },
+        .linux => {
+            const tools = b.pathFromRoot("tools");
+            const zigcc = b.pathJoin(&.{ tools, "zigcc.sh" });
+            const zigcxx = b.pathJoin(&.{ tools, "zigcxx.sh" });
+            configure_args.appendSlice(b.allocator, &.{
+                b.fmt("-DCMAKE_C_COMPILER={s}", .{zigcc}),
+                b.fmt("-DCMAKE_CXX_COMPILER={s}", .{zigcxx}),
+                b.fmt("-DCMAKE_BUILD_TYPE={s}", .{config_name}),
+                "-DGGML_METAL=OFF",
+                if (enable_vulkan) "-DGGML_VULKAN=ON" else "-DGGML_VULKAN=OFF",
+                if (cpu_baseline) "-DGGML_NATIVE=OFF" else "-DGGML_NATIVE=ON",
+            }) catch @panic("OOM");
+            if (enable_vulkan) appendLinuxVulkanCmakeArgs(b, &configure_args);
         },
         .windows => {
             const tools = b.pathFromRoot("tools");
@@ -269,6 +377,19 @@ fn addPlatformDeps(mod: *std.Build.Module, b: *std.Build, os: std.Target.Os.Tag)
                 .flags = &.{},
             });
         },
+        .linux => {
+            const gtk_cflags = pkgConfigOutput(b, &.{ "pkg-config", "--cflags", "gtk+-3.0" });
+            const gtk_cflag_items = splitFlags(b, gtk_cflags);
+
+            mod.linkSystemLibrary("GL", .{});
+            mod.linkSystemLibrary("dl", .{});
+            mod.linkSystemLibrary("pthread", .{});
+            applyPkgConfigLibs(mod, b, "gtk+-3.0");
+            mod.addCSourceFile(.{
+                .file = b.path("src/dialog_linux.c"),
+                .flags = gtk_cflag_items,
+            });
+        },
         else => std.debug.panic("unsupported target OS: {s}", .{@tagName(os)}),
     }
 }
@@ -289,8 +410,8 @@ fn addLlamaIncludes(mod: *std.Build.Module, b: *std.Build) void {
 fn addPackageStep(b: *std.Build, exe: *std.Build.Step.Compile, os: std.Target.Os.Tag) void {
     switch (os) {
         .macos => addMacPackageStep(b, exe),
-        .windows => {
-            const package_step = b.step("package", "Install audio-transcriber.exe to zig-out/bin/");
+        .windows, .linux => {
+            const package_step = b.step("package", "Install audio-transcriber binary to zig-out/bin/");
             package_step.dependOn(b.getInstallStep());
         },
         else => {
@@ -369,7 +490,7 @@ fn addMacPackageStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
 }
 
 fn addLlamaLibs(mod: *std.Build.Module, b: *std.Build, os: std.Target.Os.Tag, enable_vulkan: bool, cpu_baseline: bool) void {
-    const build_dir = cmakeBuildDir(os, cpu_baseline);
+    const build_dir = cmakeBuildDir(os, cpu_baseline, enable_vulkan);
     switch (os) {
         .macos => {
             const libs = [_][]const u8{
@@ -412,6 +533,25 @@ fn addLlamaLibs(mod: *std.Build.Module, b: *std.Build, os: std.Target.Os.Tag, en
                 mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ vulkan_sdk, "Lib" }) });
                 mod.linkSystemLibrary("vulkan-1", .{});
             }
+        },
+        .linux => {
+            const libs = [_][]const u8{
+                b.pathJoin(&.{ build_dir, "tools", "mtmd", "libmtmd.a" }),
+                b.pathJoin(&.{ build_dir, "src", "libllama.a" }),
+                b.pathJoin(&.{ build_dir, "ggml", "src", "libggml.a" }),
+                b.pathJoin(&.{ build_dir, "ggml", "src", "libggml-cpu.a" }),
+                b.pathJoin(&.{ build_dir, "ggml", "src", "libggml-base.a" }),
+            };
+            for (libs) |lib| {
+                mod.addObjectFile(.{ .cwd_relative = b.pathFromRoot(lib) });
+            }
+            if (enable_vulkan) {
+                mod.addObjectFile(.{ .cwd_relative = b.pathFromRoot(b.pathJoin(&.{
+                    build_dir, "ggml", "src", "ggml-vulkan", "libggml-vulkan.a",
+                })) });
+                applyPkgConfigLibs(mod, b, "vulkan");
+            }
+            mod.linkSystemLibrary("m", .{});
         },
         else => {},
     }
