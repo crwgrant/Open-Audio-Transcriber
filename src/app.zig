@@ -39,6 +39,11 @@ pub const App = struct {
     worker_mutex: std.Io.Mutex = std.Io.Mutex.init,
     pending_result: ?WorkerResult = null,
     worker_err: ?[]u8 = null,
+    estimate_worker: ?std.Thread = null,
+    estimate_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    estimate_mutex: std.Io.Mutex = std.Io.Mutex.init,
+    pending_estimate: ?audio_estimate.Estimate = null,
+    estimate_generation: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) App {
         return .{
@@ -49,6 +54,8 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         self.waitForWorker();
+        self.estimate_generation += 1;
+        self.detachEstimateWorker();
         self.freeDiscovered();
         runtime.freeOptions(self.allocator, self.runtimes);
         self.process_log.deinit();
@@ -107,7 +114,7 @@ pub const App = struct {
     pub fn selectRuntime(self: *App, id: runtime.Id) void {
         if (runtime.findOption(self.runtimes, id) == null) return;
         self.selected_runtime = id;
-        self.refreshAudioEstimate();
+        if (self.audio_path.len > 0) self.refreshAudioEstimate();
     }
 
     pub fn selectedModel(self: *const App) ?struct { model: []const u8, mmproj: []const u8, label: []const u8 } {
@@ -169,9 +176,11 @@ pub const App = struct {
 
     pub fn canTranscribe(self: *const App) bool {
         return self.status != .transcribing and
+            self.estimate_worker == null and
             self.selectedModel() != null and
             self.audio_path.len > 0 and
-            self.output_path.len > 0;
+            self.output_path.len > 0 and
+            !(self.audio_estimate != null and self.audio_estimate.?.loading);
     }
 
     pub fn clearLog(self: *App) void {
@@ -221,6 +230,7 @@ pub const App = struct {
     }
 
     pub fn poll(self: *App) void {
+        self.pollEstimateWorker();
         if (self.worker == null) return;
         if (!self.worker_done.load(.acquire)) return;
         self.finishWorker();
@@ -296,15 +306,87 @@ pub const App = struct {
     }
 
     fn refreshAudioEstimate(self: *App) void {
+        if (self.audio_path.len == 0) {
+            self.detachEstimateWorker();
+            if (self.audio_estimate) |*est| est.deinit(self.allocator);
+            self.audio_estimate = null;
+            return;
+        }
+
+        self.detachEstimateWorker();
+        self.estimate_generation += 1;
+        const generation = self.estimate_generation;
+
         if (self.audio_estimate) |*est| est.deinit(self.allocator);
-        self.audio_estimate = null;
-        if (self.audio_path.len == 0) return;
-        self.audio_estimate = audio_estimate.analyze(
-            self.allocator,
-            self.audio_path,
-            self.selected_runtime,
-            self.rtf_profile,
-        ) catch null;
+        self.audio_estimate = audio_estimate.loadingPlaceholder(self.allocator) catch null;
+
+        const ctx = self.allocator.create(EstimateWorkerContext) catch {
+            if (self.audio_estimate) |*est| est.deinit(self.allocator);
+            self.audio_estimate = null;
+            return;
+        };
+        ctx.* = .{
+            .app = self,
+            .audio_path = self.allocator.dupe(u8, self.audio_path) catch {
+                self.allocator.destroy(ctx);
+                if (self.audio_estimate) |*est| est.deinit(self.allocator);
+                self.audio_estimate = null;
+                return;
+            },
+            .runtime = self.selected_runtime,
+            .rtf_profile = self.rtf_profile,
+            .generation = generation,
+        };
+
+        self.estimate_done.store(false, .release);
+        self.estimate_worker = std.Thread.spawn(.{}, estimateWorkerMain, .{ctx}) catch blk: {
+            self.allocator.free(ctx.audio_path);
+            self.allocator.destroy(ctx);
+            if (self.audio_estimate) |*est| est.deinit(self.allocator);
+            self.audio_estimate = null;
+            break :blk null;
+        };
+    }
+
+    fn detachEstimateWorker(self: *App) void {
+        if (self.estimate_worker) |t| {
+            t.detach();
+            self.estimate_worker = null;
+            self.estimate_done.store(false, .release);
+        }
+    }
+
+    fn pollEstimateWorker(self: *App) void {
+        if (self.estimate_worker == null) return;
+        if (!self.estimate_done.load(.acquire)) return;
+        self.finishEstimateWorker();
+    }
+
+    fn waitForEstimateWorker(self: *App) void {
+        while (self.estimate_worker != null) {
+            if (self.estimate_done.load(.acquire)) {
+                self.finishEstimateWorker();
+            } else {
+                std.Thread.yield() catch {};
+            }
+        }
+    }
+
+    fn finishEstimateWorker(self: *App) void {
+        const io = io_util.io();
+        self.estimate_mutex.lockUncancelable(io);
+        const pending = self.pending_estimate;
+        self.pending_estimate = null;
+        self.estimate_mutex.unlock(io);
+
+        if (self.estimate_worker) |t| {
+            t.join();
+            self.estimate_worker = null;
+        }
+        self.estimate_done.store(false, .release);
+
+        if (self.audio_estimate) |*est| est.deinit(self.allocator);
+        self.audio_estimate = pending;
     }
 
     fn persistConfig(self: *App) !void {
@@ -317,6 +399,50 @@ pub const App = struct {
         });
     }
 };
+
+const EstimateWorkerContext = struct {
+    app: *App,
+    audio_path: []u8,
+    runtime: runtime.Id,
+    rtf_profile: perf_profile.Profile,
+    generation: u64,
+};
+
+fn estimateWorkerMain(ctx: *EstimateWorkerContext) void {
+    defer {
+        ctx.app.allocator.free(ctx.audio_path);
+        ctx.app.allocator.destroy(ctx);
+    }
+
+    var est = audio_estimate.analyze(ctx.app.allocator, ctx.audio_path, ctx.runtime, ctx.rtf_profile) catch blk: {
+        const text = ctx.app.allocator.dupe(u8, "Could not analyze audio file.") catch return;
+        break :blk audio_estimate.Estimate{
+            .duration_secs = null,
+            .est_positions = null,
+            .est_context_tokens = null,
+            .text = text,
+            .warn = false,
+            .critical = false,
+            .loading = false,
+        };
+    };
+
+    if (ctx.generation != ctx.app.estimate_generation) {
+        est.deinit(ctx.app.allocator);
+        return;
+    }
+
+    const io = io_util.io();
+    ctx.app.estimate_mutex.lockUncancelable(io);
+    if (ctx.generation != ctx.app.estimate_generation) {
+        ctx.app.estimate_mutex.unlock(io);
+        est.deinit(ctx.app.allocator);
+        return;
+    }
+    ctx.app.pending_estimate = est;
+    ctx.app.estimate_mutex.unlock(io);
+    ctx.app.estimate_done.store(true, .release);
+}
 
 const WorkerContext = struct {
     app: *App,

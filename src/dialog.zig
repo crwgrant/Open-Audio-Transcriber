@@ -4,6 +4,11 @@ extern fn dialog_pick_open_file(title: ?[*:0]const u8, filter_name: ?[*:0]const 
 extern fn dialog_pick_open_directory(title: ?[*:0]const u8) ?[*:0]const u8;
 extern fn dialog_pick_save_file(title: ?[*:0]const u8, default_name: ?[*:0]const u8) ?[*:0]const u8;
 extern fn dialog_free_path(path: ?[*:0]const u8) void;
+extern fn dialog_pump_events() void;
+
+pub fn pumpEvents() void {
+    dialog_pump_events();
+}
 
 pub fn pickAudioFile(allocator: std.mem.Allocator) !?[]const u8 {
     return pickOpenFile(allocator, "Select audio file", "Audio", "wav,mp3,flac");
