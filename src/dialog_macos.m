@@ -77,3 +77,5 @@ const char *dialog_pick_save_file(const char *title, const char *default_name) {
 void dialog_free_path(const char *path) {
     if (path) free((void *)path);
 }
+
+void dialog_pump_events(void) {}

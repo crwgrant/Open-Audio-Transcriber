@@ -32,6 +32,8 @@ pub const Estimate = struct {
     warn: bool,
     /// Exceeds model context limit — transcription will fail without splitting.
     critical: bool,
+    /// True while a background thread is probing the file.
+    loading: bool = false,
 
     pub fn deinit(self: *Estimate, allocator: std.mem.Allocator) void {
         allocator.free(self.text);
@@ -42,9 +44,23 @@ pub const Estimate = struct {
             .text = "",
             .warn = false,
             .critical = false,
+            .loading = false,
         };
     }
 };
+
+pub fn loadingPlaceholder(allocator: std.mem.Allocator) !Estimate {
+    const text = try allocator.dupe(u8, "Analyzing audio file...");
+    return .{
+        .duration_secs = null,
+        .est_positions = null,
+        .est_context_tokens = null,
+        .text = text,
+        .warn = false,
+        .critical = false,
+        .loading = true,
+    };
+}
 
 pub fn analyze(
     allocator: std.mem.Allocator,

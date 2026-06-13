@@ -4,6 +4,8 @@
 
 static int gtk_ready = 0;
 
+void dialog_pump_events(void);
+
 static void ensure_gtk(void) {
     if (!gtk_ready) {
         gtk_ready = gtk_init_check(NULL, NULL);
@@ -43,7 +45,10 @@ static GtkFileFilter *build_file_filter(const char *filter_name, const char *fil
 }
 
 static char *pick_path(GtkFileChooser *chooser) {
-    if (gtk_dialog_run(GTK_DIALOG(chooser)) != GTK_RESPONSE_ACCEPT) {
+    dialog_pump_events();
+    const int response = gtk_dialog_run(GTK_DIALOG(chooser));
+    dialog_pump_events();
+    if (response != GTK_RESPONSE_ACCEPT) {
         return NULL;
     }
     char *filename = gtk_file_chooser_get_filename(chooser);
@@ -116,4 +121,10 @@ const char *dialog_pick_save_file(const char *title, const char *default_name) {
 
 void dialog_free_path(const char *path) {
     if (path) free((void *)path);
+}
+
+void dialog_pump_events(void) {
+    ensure_gtk();
+    if (!gtk_ready) return;
+    while (gtk_events_pending()) gtk_main_iteration();
 }

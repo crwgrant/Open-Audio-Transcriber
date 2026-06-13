@@ -7,6 +7,19 @@ const app_mod = @import("app.zig");
 const dialog = @import("dialog.zig");
 const runtime_mod = @import("runtime.zig");
 
+const PendingDialog = enum {
+    none,
+    audio,
+    output,
+    model_model,
+    model_mmproj,
+};
+
+var pending_dialog: PendingDialog = .none;
+var pending_output_default: [256:0]u8 = @splat(0);
+var pending_model_path: ?[]const u8 = null;
+var pending_audio_path: ?[]const u8 = null;
+
 pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
     try zglfw.init();
     defer zglfw.terminate();
@@ -34,8 +47,10 @@ pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
 
     while (!window.shouldClose()) {
         application.poll();
+        applyPendingAudioPath(application, allocator);
 
         zglfw.pollEvents();
+        dialog.pumpEvents();
 
         const window_size = window.getSize();
         const fb_size = window.getFramebufferSize();
@@ -71,8 +86,57 @@ pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
         }
         zgui.end();
 
+        runDeferredDialogs(application, allocator);
+
         zgui.backend.draw();
         window.swapBuffers();
+    }
+}
+
+fn applyPendingAudioPath(app: *app_mod.App, allocator: std.mem.Allocator) void {
+    if (pending_audio_path) |path| {
+        pending_audio_path = null;
+        app.setAudioPath(path) catch {};
+        allocator.free(path);
+    }
+}
+
+fn runDeferredDialogs(app: *app_mod.App, allocator: std.mem.Allocator) void {
+    switch (pending_dialog) {
+        .none => {},
+        .audio => {
+            pending_dialog = .none;
+            if (dialog.pickAudioFile(allocator) catch null) |path| {
+                pending_audio_path = path;
+            }
+        },
+        .output => {
+            pending_dialog = .none;
+            const default_len = std.mem.indexOfScalar(u8, &pending_output_default, 0) orelse pending_output_default.len;
+            if (dialog.pickOutputFile(allocator, pending_output_default[0..default_len]) catch null) |path| {
+                defer allocator.free(path);
+                app.setOutputPath(path) catch {};
+            }
+        },
+        .model_model => {
+            pending_dialog = .none;
+            if (dialog.pickGgufFile(allocator) catch null) |path| {
+                pending_model_path = path;
+                pending_dialog = .model_mmproj;
+            }
+        },
+        .model_mmproj => {
+            pending_dialog = .none;
+            const model_path = pending_model_path;
+            pending_model_path = null;
+            if (model_path) |model| {
+                if (dialog.pickGgufFile(allocator) catch null) |mmproj| {
+                    defer allocator.free(mmproj);
+                    app.setCustomModel(model, mmproj);
+                }
+                allocator.free(model);
+            }
+        },
     }
 }
 
@@ -170,12 +234,8 @@ fn drawRuntimeSection(app: *app_mod.App) void {
     if (busy or app.runtimes.len == 1) zgui.endDisabled();
 }
 
-fn pickModelPair(app: *app_mod.App) void {
-    const model_path = dialog.pickGgufFile(app.allocator) catch return orelse return;
-    defer app.allocator.free(model_path);
-    const mmproj_path = dialog.pickGgufFile(app.allocator) catch return orelse return;
-    defer app.allocator.free(mmproj_path);
-    app.setCustomModel(model_path, mmproj_path);
+fn pickModelPair(_: *app_mod.App) void {
+    pending_dialog = .model_model;
 }
 
 fn drawAudioSection(app: *app_mod.App) void {
@@ -191,10 +251,7 @@ fn drawAudioSection(app: *app_mod.App) void {
         zgui.textColored(color, "{s}", .{est.text});
     }
     if (zgui.button("Choose audio file...", .{})) {
-        if (dialog.pickAudioFile(app.allocator) catch null) |path| {
-            defer app.allocator.free(path);
-            app.setAudioPath(path) catch {};
-        }
+        pending_dialog = .audio;
     }
     zgui.sameLine(.{});
     zgui.textDisabled("Supports wav, mp3, flac via llama.cpp", .{});
@@ -208,10 +265,10 @@ fn drawOutputSection(app: *app_mod.App) void {
             std.fs.path.basename(app.output_path)
         else
             "transcription.txt";
-        if (dialog.pickOutputFile(app.allocator, default_name) catch null) |path| {
-            defer app.allocator.free(path);
-            app.setOutputPath(path) catch {};
-        }
+        const copy_len = @min(default_name.len, pending_output_default.len - 1);
+        @memcpy(pending_output_default[0..copy_len], default_name[0..copy_len]);
+        pending_output_default[copy_len] = 0;
+        pending_dialog = .output;
     }
 }
 
