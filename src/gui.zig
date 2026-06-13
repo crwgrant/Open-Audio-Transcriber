@@ -6,6 +6,7 @@ const zopengl = @import("zopengl");
 const app_mod = @import("app.zig");
 const dialog = @import("dialog.zig");
 const runtime_mod = @import("runtime.zig");
+const window_icon = @import("window_icon.zig");
 
 const PendingDialog = enum {
     none,
@@ -30,8 +31,12 @@ pub fn run(allocator: std.mem.Allocator, application: *app_mod.App) !void {
     zglfw.windowHint(.opengl_profile, .opengl_core_profile);
     zglfw.windowHint(.opengl_forward_compat, true);
 
+    var icons = window_icon.loadEmbeddedIcons(allocator) catch null;
+    defer if (icons) |*loaded| loaded.deinit(allocator);
+
     const window = try zglfw.createWindow(960, 720, "Audio Transcriber", null, null);
     defer zglfw.destroyWindow(window);
+    if (icons) |*loaded| window_icon.applyWindowIcons(window, loaded);
     zglfw.makeContextCurrent(window);
     zglfw.swapInterval(1);
 

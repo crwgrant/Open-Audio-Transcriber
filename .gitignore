@@ -5,3 +5,4 @@ zig-out/
 *.a
 tools/ninja-win.zip
 imgui.ini
+packaging/linux-icons/

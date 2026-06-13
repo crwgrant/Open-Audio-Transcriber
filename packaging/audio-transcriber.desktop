@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Audio Transcriber
+Comment=Local speech-to-text with Qwen3-ASR models
+Exec=audio-transcriber
+Icon=audio-transcriber
+Terminal=false
+Categories=Audio;Utility;
