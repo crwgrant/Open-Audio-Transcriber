@@ -95,6 +95,36 @@ zig build -Doptimize=ReleaseFast
 zig build run -Doptimize=ReleaseFast
 ```
 
+### Linux package (desktop entry + icons)
+
+Build a local install tree with the binary, launcher icon, and `.desktop` file:
+
+```bash
+zig build package -Doptimize=ReleaseFast
+```
+
+Requires ImageMagick (`magick` or `convert`) to resize `packaging/app-icon.png` into theme icons.
+
+Output layout:
+
+```
+zig-out/bin/audio-transcriber
+zig-out/share/applications/audio-transcriber.desktop
+zig-out/share/icons/hicolor/*/apps/audio-transcriber.png
+```
+
+Run from the prefix without installing system-wide:
+
+```bash
+export PATH="$PWD/zig-out/bin:$PATH"
+export XDG_DATA_DIRS="$PWD/zig-out/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+audio-transcriber
+```
+
+Or copy `zig-out/bin/audio-transcriber` to `~/.local/bin` and the `share/` tree to `~/.local/share`.
+
+The app embeds window icons from `src/assets/` (generated from `packaging/app-icon.png`) for the GLFW window icon on X11. On Wayland, the taskbar icon comes from the installed hicolor icons and `.desktop` entry.
+
 ### Copying the .exe to another PC
 
 Release builds use `-march=native` for llama.cpp CPU code, so an `.exe` built on one PC may crash on another with **illegal instruction** (`0xc000001d`) at startup. Rebuild with a portable CPU baseline before copying:

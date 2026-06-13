@@ -410,7 +410,8 @@ fn addLlamaIncludes(mod: *std.Build.Module, b: *std.Build) void {
 fn addPackageStep(b: *std.Build, exe: *std.Build.Step.Compile, os: std.Target.Os.Tag) void {
     switch (os) {
         .macos => addMacPackageStep(b, exe),
-        .windows, .linux => {
+        .linux => addLinuxPackageStep(b),
+        .windows => {
             const package_step = b.step("package", "Install audio-transcriber binary to zig-out/bin/");
             package_step.dependOn(b.getInstallStep());
         },
@@ -420,6 +421,31 @@ fn addPackageStep(b: *std.Build, exe: *std.Build.Step.Compile, os: std.Target.Os
             package_step.dependOn(&fail.step);
         },
     }
+}
+
+fn addLinuxPackageStep(b: *std.Build) void {
+    const package_step = b.step(
+        "package",
+        "Install audio-transcriber with desktop entry and icons to zig-out/",
+    );
+    package_step.dependOn(b.getInstallStep());
+
+    const generate_icons = b.addSystemCommand(&.{ "bash", b.pathFromRoot("packaging/generate-linux-icons.sh") });
+
+    const install_desktop = b.addInstallFile(
+        b.path("packaging/audio-transcriber.desktop"),
+        "share/applications/audio-transcriber.desktop",
+    );
+
+    const install_icons = b.addInstallDirectory(.{
+        .source_dir = b.path("packaging/linux-icons/hicolor"),
+        .install_dir = .prefix,
+        .install_subdir = "share/icons/hicolor",
+    });
+    install_icons.step.dependOn(&generate_icons.step);
+
+    package_step.dependOn(&install_desktop.step);
+    package_step.dependOn(&install_icons.step);
 }
 
 fn addMacPackageStep(b: *std.Build, exe: *std.Build.Step.Compile) void {

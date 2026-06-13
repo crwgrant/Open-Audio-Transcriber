@@ -139,9 +139,9 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
 
     if (opts.log_buffer) |buf| buf.appendFmt("Processing audio: {s}", .{opts.audio_path});
 
-    const audio_bitmap = c.mtmd_helper_bitmap_init_from_file(mtmd_ctx, opts.audio_path.ptr, false);
-    if (audio_bitmap == null) return error.AudioLoadFailed;
-    defer c.mtmd_bitmap_free(audio_bitmap);
+    const audio_wrapper = c.mtmd_helper_bitmap_init_from_file(mtmd_ctx, opts.audio_path.ptr, false);
+    if (audio_wrapper.bitmap == null) return error.AudioLoadFailed;
+    defer c.mtmd_bitmap_free(audio_wrapper.bitmap);
     try checkCancelled(opts.cancel_flag);
 
     const marker = c.mtmd_default_marker();
@@ -163,7 +163,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
     const chunks = c.mtmd_input_chunks_init() orelse return error.TokenizeFailed;
     defer c.mtmd_input_chunks_free(chunks);
 
-    var bitmaps: [1]?*const c.mtmd_bitmap = .{audio_bitmap};
+    var bitmaps: [1]?*const c.mtmd_bitmap = .{audio_wrapper.bitmap};
     const tok_res = c.mtmd_tokenize(mtmd_ctx, chunks, &text, &bitmaps, 1);
     if (tok_res != 0) return error.TokenizeFailed;
 
