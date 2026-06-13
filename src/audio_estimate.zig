@@ -2,10 +2,7 @@ const std = @import("std");
 
 const perf_profile = @import("perf_profile.zig");
 const runtime_mod = @import("runtime.zig");
-
-const mtmd_c = @cImport({
-    @cInclude("mtmd-helper.h");
-});
+const audio_probe = @import("audio_probe.zig");
 
 /// Matches transcribe.Options.max_tokens default.
 pub const default_max_generation_tokens: u32 = 4096;
@@ -115,11 +112,8 @@ fn computeContextSize(positions: u32, max_gen: u32) u32 {
 }
 
 fn probeDuration(allocator: std.mem.Allocator, path: []const u8) ?f64 {
-    const path_z = allocator.dupeZ(u8, path) catch return null;
-    defer allocator.free(path_z);
-    const secs = mtmd_c.mtmd_helper_probe_audio_duration_seconds(path_z.ptr);
-    if (secs < 0.0) return null;
-    return secs;
+    _ = allocator;
+    return audio_probe.probeDurationSeconds(path);
 }
 
 fn formatDuration(buf: []u8, secs: f64) []const u8 {
