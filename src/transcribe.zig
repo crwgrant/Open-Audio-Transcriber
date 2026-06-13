@@ -139,8 +139,7 @@ pub fn transcribe(allocator: std.mem.Allocator, opts: Options) Error![]u8 {
 
     if (opts.log_buffer) |buf| buf.appendFmt("Processing audio: {s}", .{opts.audio_path});
 
-    const audio_wrapper = c.mtmd_helper_bitmap_init_from_file(mtmd_ctx, opts.audio_path.ptr, false);
-    const audio_bitmap = audio_wrapper.bitmap;
+    const audio_bitmap = c.mtmd_helper_bitmap_init_from_file(mtmd_ctx, opts.audio_path.ptr, false);
     if (audio_bitmap == null) return error.AudioLoadFailed;
     defer c.mtmd_bitmap_free(audio_bitmap);
     try checkCancelled(opts.cancel_flag);
