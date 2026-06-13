@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const perf_profile = @import("perf_profile.zig");
 const runtime_mod = @import("runtime.zig");
 
 const mtmd_c = @cImport({
@@ -45,7 +46,12 @@ pub const Estimate = struct {
     }
 };
 
-pub fn analyze(allocator: std.mem.Allocator, audio_path: []const u8, runtime: runtime_mod.Id) !Estimate {
+pub fn analyze(
+    allocator: std.mem.Allocator,
+    audio_path: []const u8,
+    runtime: runtime_mod.Id,
+    rtf_profile: perf_profile.Profile,
+) !Estimate {
     const duration = probeDuration(allocator, audio_path);
 
     var est_positions: ?u32 = null;
@@ -61,7 +67,16 @@ pub fn analyze(allocator: std.mem.Allocator, audio_path: []const u8, runtime: ru
     const warn = critical or (if (est_context) |ctx| ctx > 16384 else false) or
         (runtime == .vulkan and if (est_context) |ctx| ctx > 10000 else false);
 
-    const text = try formatEstimate(allocator, duration, est_positions, est_context, runtime, critical);
+    const measured_rtf = rtf_profile.get(runtime);
+    const text = try formatEstimate(
+        allocator,
+        duration,
+        est_positions,
+        est_context,
+        runtime,
+        critical,
+        measured_rtf,
+    );
 
     return .{
         .duration_secs = duration,
@@ -102,6 +117,40 @@ fn formatDuration(buf: []u8, secs: f64) []const u8 {
     return std.fmt.bufPrint(buf, "{d}:{d:02}", .{ minutes, seconds }) catch "0:00";
 }
 
+fn appendTimeEstimate(
+    lines: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    duration_secs: f64,
+    runtime: runtime_mod.Id,
+    measured_rtf: ?f64,
+) !void {
+    var low_buf: [32]u8 = undefined;
+    var high_buf: [32]u8 = undefined;
+    var single_buf: [32]u8 = undefined;
+
+    if (measured_rtf) |rtf| {
+        const est_secs = duration_secs * rtf;
+        const est_text = formatDuration(&single_buf, est_secs);
+        try lines.appendSlice(allocator, "Est. transcribe time: ~");
+        try lines.appendSlice(allocator, est_text);
+        var rtf_buf: [16]u8 = undefined;
+        const rtf_str = try std.fmt.bufPrint(&rtf_buf, "{d:.1}x", .{rtf});
+        try lines.appendSlice(allocator, " (based on last run, ");
+        try lines.appendSlice(allocator, rtf_str);
+        try lines.appendSlice(allocator, " realtime)\n");
+        return;
+    }
+
+    const range = perf_profile.defaultRtfRange(runtime);
+    const low_text = formatDuration(&low_buf, duration_secs * range.low);
+    const high_text = formatDuration(&high_buf, duration_secs * range.high);
+    try lines.appendSlice(allocator, "Est. transcribe time: ~");
+    try lines.appendSlice(allocator, low_text);
+    try lines.appendSlice(allocator, "–");
+    try lines.appendSlice(allocator, high_text);
+    try lines.appendSlice(allocator, " (varies by CPU/GPU; refines after first run)\n");
+}
+
 fn formatEstimate(
     allocator: std.mem.Allocator,
     duration: ?f64,
@@ -109,6 +158,7 @@ fn formatEstimate(
     est_context: ?u32,
     runtime: runtime_mod.Id,
     critical: bool,
+    measured_rtf: ?f64,
 ) ![]u8 {
     var lines: std.ArrayList(u8) = .empty;
     errdefer lines.deinit(allocator);
@@ -124,6 +174,8 @@ fn formatEstimate(
     try lines.appendSlice(allocator, "Duration: ");
     try lines.appendSlice(allocator, dur_text);
     try lines.appendSlice(allocator, "\n");
+
+    try appendTimeEstimate(&lines, allocator, duration.?, runtime, measured_rtf);
 
     if (est_positions) |pos| {
         var num_buf: [32]u8 = undefined;

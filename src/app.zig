@@ -5,6 +5,7 @@ const audio_estimate = @import("audio_estimate.zig");
 const io_util = @import("io_util.zig");
 const log = @import("log.zig");
 const models = @import("models.zig");
+const perf_profile = @import("perf_profile.zig");
 const runtime = @import("runtime.zig");
 const transcribe = @import("transcribe.zig");
 
@@ -31,6 +32,7 @@ pub const App = struct {
     process_log: log.Buffer,
     runtimes: []runtime.Option = &.{},
     selected_runtime: runtime.Id = .cpu,
+    rtf_profile: perf_profile.Profile = .{},
     worker: ?std.Thread = null,
     worker_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -78,6 +80,7 @@ pub const App = struct {
         if (try config.load(self.allocator)) |saved| {
             defer saved.deinit(self.allocator);
             if (saved.runtime) |rt| saved_runtime = rt;
+            self.rtf_profile = saved.rtfProfile();
             if (models.findByModelPath(self.discovered.items, saved.model_path)) |idx| {
                 self.selected_index = idx;
             } else {
@@ -158,13 +161,6 @@ pub const App = struct {
         }
     }
 
-    fn refreshAudioEstimate(self: *App) void {
-        if (self.audio_estimate) |*est| est.deinit(self.allocator);
-        self.audio_estimate = null;
-        if (self.audio_path.len == 0) return;
-        self.audio_estimate = audio_estimate.analyze(self.allocator, self.audio_path, self.selected_runtime) catch null;
-    }
-
     pub fn setOutputPath(self: *App, path: []const u8) !void {
         const copy = try self.allocator.dupe(u8, path);
         self.allocator.free(self.output_path);
@@ -198,6 +194,7 @@ pub const App = struct {
             .model_path = model.model,
             .mmproj_path = model.mmproj,
             .runtime = self.selected_runtime,
+            .rtf_profile = self.rtf_profile,
         });
 
         if (self.worker_err) |e| {
@@ -217,6 +214,7 @@ pub const App = struct {
             .audio_path = try self.allocator.dupeZ(u8, self.audio_path),
             .output_path = try self.allocator.dupe(u8, self.output_path),
             .runtime = self.selected_runtime,
+            .audio_duration_secs = if (self.audio_estimate) |est| est.duration_secs else null,
         };
 
         self.worker = try std.Thread.spawn(.{}, workerMain, .{ctx});
@@ -269,10 +267,20 @@ pub const App = struct {
 
     fn onWorkerDone(self: *App, result: WorkerResult) void {
         switch (result) {
-            .success => |text| {
-                self.allocator.free(text);
-                self.process_log.appendFmt("Transcription complete.", .{});
+            .success => |done| {
+                self.allocator.free(done.text);
+                if (done.audio_secs > 0.0 and done.elapsed_secs > 0.0) {
+                    const rtf = done.elapsed_secs / done.audio_secs;
+                    self.rtf_profile.set(self.selected_runtime, rtf);
+                    self.refreshAudioEstimate();
+                    var rtf_buf: [32]u8 = undefined;
+                    const rtf_str = std.fmt.bufPrint(&rtf_buf, "{d:.1}x", .{rtf}) catch "—";
+                    self.process_log.appendFmt("Transcription complete ({s} realtime).", .{rtf_str});
+                } else {
+                    self.process_log.appendFmt("Transcription complete.", .{});
+                }
                 self.setStatus(.done, "Transcription complete");
+                self.persistConfig() catch {};
             },
             .cancelled => {
                 self.process_log.appendFmt("Transcription cancelled.", .{});
@@ -286,6 +294,28 @@ pub const App = struct {
             },
         }
     }
+
+    fn refreshAudioEstimate(self: *App) void {
+        if (self.audio_estimate) |*est| est.deinit(self.allocator);
+        self.audio_estimate = null;
+        if (self.audio_path.len == 0) return;
+        self.audio_estimate = audio_estimate.analyze(
+            self.allocator,
+            self.audio_path,
+            self.selected_runtime,
+            self.rtf_profile,
+        ) catch null;
+    }
+
+    fn persistConfig(self: *App) !void {
+        const model = self.selectedModel() orelse return;
+        try config.save(self.allocator, .{
+            .model_path = model.model,
+            .mmproj_path = model.mmproj,
+            .runtime = self.selected_runtime,
+            .rtf_profile = self.rtf_profile,
+        });
+    }
 };
 
 const WorkerContext = struct {
@@ -295,10 +325,15 @@ const WorkerContext = struct {
     audio_path: [:0]u8,
     output_path: []u8,
     runtime: runtime.Id,
+    audio_duration_secs: ?f64,
 };
 
 const WorkerResult = union(enum) {
-    success: []u8,
+    success: struct {
+        text: []u8,
+        elapsed_secs: f64,
+        audio_secs: f64,
+    },
     cancelled: void,
     failure: []u8,
 };
@@ -313,6 +348,8 @@ fn workerMain(ctx: *WorkerContext) void {
     }
 
     const result: WorkerResult = blk: {
+        const io = io_util.io();
+        const start = std.Io.Clock.Timestamp.now(io, .real);
         const text = transcribe.transcribe(ctx.app.allocator, .{
             .model_path = ctx.model_path,
             .mmproj_path = ctx.mmproj_path,
@@ -338,7 +375,17 @@ fn workerMain(ctx: *WorkerContext) void {
             break :blk .{ .failure = msg };
         };
 
-        break :blk .{ .success = text };
+        const end = std.Io.Clock.Timestamp.now(io, .real);
+        const elapsed_dur = std.Io.Timestamp.durationTo(start.raw, end.raw);
+        const elapsed_secs = @as(f64, @floatFromInt(elapsed_dur.nanoseconds)) / 1e9;
+
+        break :blk .{
+            .success = .{
+                .text = text,
+                .elapsed_secs = elapsed_secs,
+                .audio_secs = ctx.audio_duration_secs orelse 0.0,
+            },
+        };
     };
 
     const io = io_util.io();
