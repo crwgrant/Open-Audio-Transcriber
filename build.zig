@@ -428,10 +428,16 @@ fn addMacPackageStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
     const app_bundle = "Audio Transcriber.app";
     const app_contents = b.pathJoin(&.{ app_bundle, "Contents" });
     const plist_dest = b.pathJoin(&.{ app_contents, "Info.plist" });
+    const resources_dest = b.pathJoin(&.{ app_contents, "Resources" });
+    const icon_dest = b.pathJoin(&.{ resources_dest, "AppIcon.icns" });
     const macos_dest = b.pathJoin(&.{ app_contents, "MacOS" });
     const exe_dest = b.pathJoin(&.{ macos_dest, "audio-transcriber" });
 
+    const generate_icon = b.addSystemCommand(&.{ "bash", b.pathFromRoot("packaging/generate-icon.sh") });
+
     const install_plist = b.addInstallFile(b.path("packaging/Info.plist"), plist_dest);
+    const install_icon = b.addInstallFile(b.path("packaging/AppIcon.icns"), icon_dest);
+    install_icon.step.dependOn(&generate_icon.step);
     const install_exe = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .{ .custom = macos_dest } },
         .dest_sub_path = "audio-transcriber",
@@ -439,6 +445,7 @@ fn addMacPackageStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
 
     package_step.dependOn(&exe.step);
     package_step.dependOn(&install_plist.step);
+    package_step.dependOn(&install_icon.step);
     package_step.dependOn(&install_exe.step);
 
     const codesign_identity = b.option(
@@ -471,6 +478,7 @@ fn addMacPackageStep(b: *std.Build, exe: *std.Build.Step.Compile) void {
     sign_exe.addArg(exe_path);
     sign_exe.step.dependOn(&install_exe.step);
     sign_exe.step.dependOn(&install_plist.step);
+    sign_exe.step.dependOn(&install_icon.step);
 
     const sign_app = b.addSystemCommand(&.{"codesign", "--force", "--sign"});
     sign_app.addArg(codesign_identity);
