@@ -181,6 +181,15 @@ fn pickModelPair(app: *app_mod.App) void {
 fn drawAudioSection(app: *app_mod.App) void {
     zgui.text("Audio input", .{});
     zgui.textWrapped("{s}", .{if (app.audio_path.len > 0) app.audio_path else "(none selected)"});
+    if (app.audio_estimate) |est| {
+        const color: [4]f32 = if (est.critical)
+            .{ 1.0, 0.35, 0.35, 1.0 }
+        else if (est.warn)
+            .{ 1.0, 0.75, 0.2, 1.0 }
+        else
+            .{ 0.55, 0.55, 0.55, 1.0 };
+        zgui.textColored(color, "{s}", .{est.text});
+    }
     if (zgui.button("Choose audio file...", .{})) {
         if (dialog.pickAudioFile(app.allocator) catch null) |path| {
             defer app.allocator.free(path);

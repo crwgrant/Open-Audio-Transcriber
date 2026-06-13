@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const config = @import("config.zig");
+const audio_estimate = @import("audio_estimate.zig");
 const io_util = @import("io_util.zig");
 const log = @import("log.zig");
 const models = @import("models.zig");
@@ -25,6 +26,7 @@ pub const App = struct {
     custom_model_path: []const u8 = "",
     custom_mmproj_path: []const u8 = "",
     audio_path: []const u8 = "",
+    audio_estimate: ?audio_estimate.Estimate = null,
     output_path: []const u8 = "",
     process_log: log.Buffer,
     runtimes: []runtime.Option = &.{},
@@ -51,6 +53,7 @@ pub const App = struct {
         if (self.custom_model_path.len > 0) self.allocator.free(self.custom_model_path);
         if (self.custom_mmproj_path.len > 0) self.allocator.free(self.custom_mmproj_path);
         if (self.audio_path.len > 0) self.allocator.free(self.audio_path);
+        if (self.audio_estimate) |*est| est.deinit(self.allocator);
         if (self.output_path.len > 0) self.allocator.free(self.output_path);
         if (self.worker_err) |e| self.allocator.free(e);
     }
@@ -101,6 +104,7 @@ pub const App = struct {
     pub fn selectRuntime(self: *App, id: runtime.Id) void {
         if (runtime.findOption(self.runtimes, id) == null) return;
         self.selected_runtime = id;
+        self.refreshAudioEstimate();
     }
 
     pub fn selectedModel(self: *const App) ?struct { model: []const u8, mmproj: []const u8, label: []const u8 } {
@@ -144,6 +148,7 @@ pub const App = struct {
         const copy = try self.allocator.dupe(u8, path);
         self.allocator.free(self.audio_path);
         self.audio_path = copy;
+        self.refreshAudioEstimate();
 
         if (self.output_path.len == 0) {
             const stem = std.fs.path.stem(path);
@@ -151,6 +156,13 @@ pub const App = struct {
             self.allocator.free(self.output_path);
             self.output_path = out;
         }
+    }
+
+    fn refreshAudioEstimate(self: *App) void {
+        if (self.audio_estimate) |*est| est.deinit(self.allocator);
+        self.audio_estimate = null;
+        if (self.audio_path.len == 0) return;
+        self.audio_estimate = audio_estimate.analyze(self.allocator, self.audio_path, self.selected_runtime) catch null;
     }
 
     pub fn setOutputPath(self: *App, path: []const u8) !void {
