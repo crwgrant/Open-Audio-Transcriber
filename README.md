@@ -1,12 +1,20 @@
-# Audio Transcriber (Zig)
+# Open Audio Transcriber
 
-Desktop app for transcribing audio files to text using [llama.cpp](https://github.com/ggml-org/llama.cpp) and [Qwen3-ASR](https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF).
+**Open Audio Transcriber** is a desktop app that transcribes audio files to text **entirely on your machine**. Nothing is uploaded to the cloud — your audio and transcripts stay local.
+
+Inference runs with [llama.cpp](https://github.com/ggml-org/llama.cpp) and a small local ASR model (default: [Qwen3-ASR-1.7B](https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF), about **2 GB** on disk for the main GGUF plus mmproj). You download the model once, pick wav/mp3/flac files, and transcribe offline.
 
 Built with:
 
 - [llama.cpp.zig](https://github.com/Deins/llama.cpp.zig) — vendored under `deps/llama.cpp.zig` (llama.cpp submodule updated to current master for ASR/mtmd support)
 - [zgui](https://github.com/zig-gamedev/zgui) + [zglfw](https://github.com/zig-gamedev/zglfw) — Dear ImGui desktop UI
 - llama.cpp `libmtmd` — multimodal audio encoder (wav/mp3/flac via miniaudio)
+
+## Local-first
+
+- **Private** — transcription runs on your CPU or GPU; no account or API key.
+- **Offline-capable** — after you have the model files, the app does not need network access to transcribe.
+- **Small model** — the default Qwen3-ASR setup is roughly **2 GB** total (model + mmproj); larger or smaller quantizations are supported if you browse to another pair.
 
 ## Default model
 
@@ -18,7 +26,7 @@ The default model is **ggml-org/Qwen3-ASR-1.7B**, expected at:
   mmproj-Qwen3-ASR-1.7B-bf16.gguf
 ```
 
-Both the main GGUF and matching `mmproj` file are required.
+Both the main GGUF and matching `mmproj` file are required. Download them from Hugging Face or pull them via LM Studio — they remain on your disk and are loaded locally at runtime.
 
 ## Model discovery
 
@@ -37,7 +45,7 @@ Use the model dropdown or **Browse model pair...** / right-click context menu to
 - Zig 0.16+
 - CMake (e.g. `brew install cmake`)
 - macOS with Xcode command-line tools (Metal backend)
-- A Qwen3-ASR GGUF + mmproj pair (see above)
+- A Qwen3-ASR GGUF + mmproj pair on disk (~2 GB for the default setup; see above)
 
 ## Build & run
 
@@ -200,10 +208,11 @@ For distribution outside your Mac, notarize the signed `.app` with Apple after p
 
 ## Usage
 
-1. Confirm or select an ASR model (default: Qwen3-ASR-1.7B from LM Studio path).
-2. Choose an audio file (wav, mp3, flac).
-3. Choose an output `.txt` path (defaults to `<audio-stem>.txt`).
-4. Click **Transcribe**.
+1. Install a local ASR model (default: Qwen3-ASR-1.7B, ~2 GB) if you have not already.
+2. Confirm or select an ASR model in the app (default path: LM Studio models folder).
+3. Choose an audio file (wav, mp3, flac).
+4. Choose an output `.txt` path (defaults to `<audio-stem>.txt`).
+5. Click **Transcribe** — processing stays on your machine.
 
 ## Agent / handoff context
 
