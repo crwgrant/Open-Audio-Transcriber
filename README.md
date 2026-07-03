@@ -220,6 +220,12 @@ For distribution outside your Mac, notarize the signed `.app` with Apple after p
 
 For continuing development on another machine (e.g. Windows port), see **[docs/AGENT_CONTEXT.md](docs/AGENT_CONTEXT.md)** — architecture, macOS fixes, and Windows port checklist.
 
+## License
+
+Open Audio Transcriber is licensed under the [MIT License](LICENSE).
+
+Third-party components (llama.cpp, Dear ImGui, GLFW, and others) carry their own licenses in `deps/` and fetched packages. **ASR model weights** (for example Qwen3-ASR on Hugging Face) are separate downloads and are governed by their own model licenses, not this repository.
+
 ## Notes
 
 - llama.cpp.zig upstream targets Zig 0.14 and an older llama.cpp without ASR. This project vendors llama.cpp.zig but uses a current llama.cpp submodule and links `libmtmd` built by CMake.
