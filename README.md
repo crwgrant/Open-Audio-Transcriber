@@ -4,6 +4,8 @@
 
 Inference runs with [llama.cpp](https://github.com/ggml-org/llama.cpp) and a small local ASR model (default: [Qwen3-ASR-1.7B](https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF), about **2 GB** on disk for the main GGUF plus mmproj). You download the model once, pick wav/mp3/flac files, and transcribe offline.
 
+![Open Audio Transcriber on macOS — model selection, runtime, audio input, and transcription log](packaging/screenshot-macos.png)
+
 Built with:
 
 - [llama.cpp.zig](https://github.com/Deins/llama.cpp.zig) — vendored under `deps/llama.cpp.zig` (llama.cpp submodule updated to current master for ASR/mtmd support)
