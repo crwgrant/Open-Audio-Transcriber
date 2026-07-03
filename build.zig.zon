@@ -26,5 +26,6 @@
         "packaging",
         "tools",
         "README.md",
+        "LICENSE",
     },
 }

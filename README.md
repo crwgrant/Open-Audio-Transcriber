@@ -4,6 +4,8 @@
 
 Inference runs with [llama.cpp](https://github.com/ggml-org/llama.cpp) and a small local ASR model (default: [Qwen3-ASR-1.7B](https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF), about **2 GB** on disk for the main GGUF plus mmproj). You download the model once, pick wav/mp3/flac files, and transcribe offline.
 
+![Open Audio Transcriber on macOS — model selection, runtime, audio input, and transcription log](packaging/screenshot-macos.png)
+
 Built with:
 
 - [llama.cpp.zig](https://github.com/Deins/llama.cpp.zig) — vendored under `deps/llama.cpp.zig` (llama.cpp submodule updated to current master for ASR/mtmd support)
@@ -217,6 +219,12 @@ For distribution outside your Mac, notarize the signed `.app` with Apple after p
 ## Agent / handoff context
 
 For continuing development on another machine (e.g. Windows port), see **[docs/AGENT_CONTEXT.md](docs/AGENT_CONTEXT.md)** — architecture, macOS fixes, and Windows port checklist.
+
+## License
+
+Open Audio Transcriber is licensed under the [MIT License](LICENSE).
+
+Third-party components (llama.cpp, Dear ImGui, GLFW, and others) carry their own licenses in `deps/` and fetched packages. **ASR model weights** (for example Qwen3-ASR on Hugging Face) are separate downloads and are governed by their own model licenses, not this repository.
 
 ## Notes
 
